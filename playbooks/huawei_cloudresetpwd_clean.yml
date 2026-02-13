@@ -1,0 +1,230 @@
+---
+- name: Huawei CloudResetPwdAgent - Clean Reinstall (Multi-OS) via AAP Survey
+  hosts: huawei_ecs
+  gather_facts: true
+
+  vars:
+    # ====== ARTIFACTS (GitHub RAW) ======
+    plugin_zip_url_linux: "https://raw.githubusercontent.com/KarenMAnsible/ansible-artifacts/main/huawei/cloudresetpwd/linux/CloudResetPwdAgent_linux.zip"
+    plugin_zip_url_windows: "https://raw.githubusercontent.com/KarenMAnsible/ansible-artifacts/main/huawei/cloudresetpwd/windows/CloudResetPwdAgent_Windows.zip"
+
+    # (Opcional) Si luego quieres validar integridad, pon los SHA256 reales (sin comillas raras)
+    plugin_zip_sha256_linux: ""     # e.g. "abc123..."
+    plugin_zip_sha256_windows: ""   # e.g. "def456..."
+
+    # ====== WINDOWS ======
+    win_workdir: "C:\\Temp\\CloudResetPwdAgent"
+    win_zip_path: "C:\\Temp\\CloudResetPwdAgent_Windows.zip"
+    win_services_to_remove:
+      - "cloudResetPwdAgent"
+      - "cloudResetPwdUpdateAgent"
+    win_paths_to_remove:
+      - "C:\\CloudResetPwdAgent"
+      - "C:\\CloudResetPwdUpdateAgent"
+
+    # ====== LINUX ======
+    linux_workdir: "/tmp/cloudresetpwdagent"
+    linux_zip_path: "/tmp/CloudResetPwdAgent_Linux.zip"
+    linux_paths_to_remove:
+      - "/CloudrResetPwdAgent"
+      - "/CloudResetPwdUpdateAgent"
+
+  pre_tasks:
+    - name: Validar variables del Survey (AAP)
+      ansible.builtin.assert:
+        that:
+          - target_user is defined
+          - target_password is defined
+          - target_user | length > 0
+          - target_password | length > 0
+        fail_msg: "Faltan variables del Survey: target_user y/o target_password"
+
+    - name: Windows | Aplicar credenciales desde Survey (WinRM)
+      when: ansible_os_family == "Windows"
+      no_log: true
+      ansible.builtin.set_fact:
+        ansible_user: "{{ target_user }}"
+        ansible_password: "{{ target_password }}"
+
+    - name: Linux | Aplicar password de become desde Survey (sudo)
+      when: ansible_system == "Linux"
+      no_log: true
+      ansible.builtin.set_fact:
+        ansible_become_password: "{{ target_password }}"
+
+    - name: Mostrar SO detectado (sin secretos)
+      ansible.builtin.debug:
+        msg:
+          host: "{{ inventory_hostname }}"
+          os_family: "{{ ansible_os_family }}"
+          system: "{{ ansible_system }}"
+          distro: "{{ ansible_distribution | default('N/A') }}"
+
+  tasks:
+    ###########################################################################
+    # WINDOWS BLOCK
+    ###########################################################################
+    - name: Windows | Clean reinstall CloudResetPwdAgent
+      when: ansible_os_family == "Windows"
+      block:
+        - name: Windows | Asegurar carpeta de trabajo
+          ansible.windows.win_file:
+            path: "{{ win_workdir }}"
+            state: directory
+
+        - name: Windows | Detener servicios si existen (no falla si no existen)
+          ansible.windows.win_shell: |
+            $names = @({{ win_services_to_remove | to_json }})
+            foreach ($n in $names) {
+              $s = Get-Service -Name $n -ErrorAction SilentlyContinue
+              if ($null -ne $s) {
+                if ($s.Status -ne "Stopped") { Stop-Service -Name $n -Force -ErrorAction SilentlyContinue }
+              }
+            }
+          changed_when: false
+
+        - name: Windows | Ejecutar desinstaladores si existen (opcional)
+          ansible.windows.win_shell: |
+            $candidates = @(
+              "C:\CloudResetPwdAgent\bin\UninstallApp-NT.bat",
+              "C:\CloudResetPwdUpdateAgent\bin\UninstallApp-NT.bat"
+            )
+            foreach ($f in $candidates) {
+              if (Test-Path $f) { cmd.exe /c $f }
+            }
+          failed_when: false
+
+        - name: Windows | Eliminar servicios con sc.exe (no falla si no existen)
+          ansible.windows.win_shell: |
+            $names = @({{ win_services_to_remove | to_json }})
+            foreach ($n in $names) {
+              cmd.exe /c "sc.exe stop $n" | Out-Null
+              cmd.exe /c "sc.exe delete $n" | Out-Null
+            }
+          changed_when: false
+          failed_when: false
+
+        - name: Windows | Borrar carpetas destino del agente
+          ansible.windows.win_file:
+            path: "{{ item }}"
+            state: absent
+          loop: "{{ win_paths_to_remove }}"
+          failed_when: false
+
+        - name: Windows | Descargar ZIP más reciente (desde GitHub RAW)
+          ansible.windows.win_get_url:
+            url: "{{ plugin_zip_url_windows }}"
+            dest: "{{ win_zip_path }}"
+
+        - name: Windows | Verificar SHA256 del ZIP (si se configuró)
+          ansible.windows.win_shell: |
+            (Get-FileHash "{{ win_zip_path }}" -Algorithm SHA256).Hash.ToLower()
+          register: zip_sha_win
+          changed_when: false
+
+        - name: Windows | Fallar si SHA256 no coincide (solo si se definió)
+          ansible.builtin.fail:
+            msg: "SHA256 ZIP Windows no coincide. Esperado={{ plugin_zip_sha256_windows }} Actual={{ zip_sha_win.stdout | trim }}"
+          when:
+            - plugin_zip_sha256_windows | length > 0
+            - (zip_sha_win.stdout | trim) != (plugin_zip_sha256_windows | lower)
+
+        - name: Windows | Descomprimir ZIP
+          ansible.windows.win_unzip:
+            src: "{{ win_zip_path }}"
+            dest: "{{ win_workdir }}"
+
+        - name: Windows | Instalar plug-in (setup.bat)
+          ansible.windows.win_shell: |
+            cmd.exe /c "{{ win_workdir }}\CloudResetPwdAgent\CloudResetPwdAgent.Windows\setup.bat"
+
+        - name: Windows | Validar que el servicio existe
+          ansible.windows.win_shell: |
+            $s = Get-Service -Name "cloudResetPwdAgent" -ErrorAction SilentlyContinue
+            if ($null -eq $s) { throw "No se encontró cloudResetPwdAgent tras instalación." } else { $s.Status }
+          register: final_svc
+          changed_when: false
+
+        - name: Windows | Asegurar servicio iniciado
+          ansible.windows.win_service:
+            name: "cloudResetPwdAgent"
+            state: started
+          when: (final_svc.stdout | trim) != "Running"
+
+    ###########################################################################
+    # LINUX BLOCK (cualquier distro)
+    ###########################################################################
+    - name: Linux | Clean reinstall CloudResetPwdAgent
+      when: ansible_system == "Linux"
+      become: true
+      block:
+        - name: Linux | Desinstalar/Detener agentes y borrar carpetas (clean)
+          ansible.builtin.shell: |
+            set -e
+
+            # Agent
+            if [ -x /CloudrResetPwdAgent/bin/cloudResetPwdAgent.script ]; then
+              cd /CloudrResetPwdAgent/bin
+              ./cloudResetPwdAgent.script stop || true
+              ./cloudResetPwdAgent.script remove || true
+            fi
+
+            # UpdateAgent
+            if [ -x /CloudResetPwdUpdateAgent/bin/cloudResetPwdUpdateAgent.script ]; then
+              cd /CloudResetPwdUpdateAgent/bin
+              ./cloudResetPwdUpdateAgent.script stop || true
+              ./cloudResetPwdUpdateAgent.script remove || true
+            fi
+
+            rm -rf /CloudrResetPwdAgent /CloudResetPwdUpdateAgent
+          args:
+            executable: /bin/bash
+
+        - name: Linux | Preparar directorio de trabajo
+          ansible.builtin.file:
+            path: "{{ linux_workdir }}"
+            state: directory
+            mode: "0755"
+
+        - name: Linux | Descargar ZIP más reciente (desde GitHub RAW)
+          ansible.builtin.get_url:
+            url: "{{ plugin_zip_url_linux }}"
+            dest: "{{ linux_zip_path }}"
+            mode: "0644"
+
+        - name: Linux | Verificar SHA256 del ZIP (si se configuró)
+          ansible.builtin.shell: "sha256sum {{ linux_zip_path }} | awk '{print $1}'"
+          register: zip_sha_linux
+          changed_when: false
+
+        - name: Linux | Fallar si SHA256 no coincide (solo si se definió)
+          ansible.builtin.fail:
+            msg: "SHA256 ZIP Linux no coincide. Esperado={{ plugin_zip_sha256_linux }} Actual={{ zip_sha_linux.stdout }}"
+          when:
+            - plugin_zip_sha256_linux | length > 0
+            - zip_sha_linux.stdout != plugin_zip_sha256_linux
+
+        - name: Linux | Descomprimir ZIP
+          ansible.builtin.unarchive:
+            src: "{{ linux_zip_path }}"
+            dest: "{{ linux_workdir }}"
+            remote_src: true
+
+        - name: Linux | Instalar plug-in (setup.sh)
+          ansible.builtin.shell: |
+            set -e
+            cd "{{ linux_workdir }}/CloudResetPwdAgent/CloudResetPwdAgent.Linux"
+            chmod +x setup.sh
+            ./setup.sh
+          args:
+            executable: /bin/bash
+
+        - name: Linux | Validar que el directorio del agente existe
+          ansible.builtin.stat:
+            path: "/CloudrResetPwdAgent"
+          register: agent_dir
+
+        - name: Linux | Fallar si no se instaló el agente
+          ansible.builtin.fail:
+            msg: "No se detectó /CloudrResetPwdAgent después de instalar."
+          when: not agent_dir.stat.exists
