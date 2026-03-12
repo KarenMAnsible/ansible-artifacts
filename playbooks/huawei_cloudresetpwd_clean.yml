@@ -74,14 +74,17 @@
 
         - name: Windows | Detener servicios si existen (no falla si no existen)
           ansible.windows.win_shell: |
-            $names = @({{ win_services_to_remove | to_json }})
+            $names = @("cloudResetPwdAgent","cloudResetPwdUpdateAgent")
             foreach ($n in $names) {
               $s = Get-Service -Name $n -ErrorAction SilentlyContinue
               if ($null -ne $s) {
-                if ($s.Status -ne "Stopped") { Stop-Service -Name $n -Force -ErrorAction SilentlyContinue }
+                if ($s.Status -ne "Stopped") {
+                  Stop-Service -Name $n -Force -ErrorAction SilentlyContinue
+                }
               }
             }
           changed_when: false
+          failed_when: false
 
         - name: Windows | Ejecutar desinstaladores si existen (opcional)
           ansible.windows.win_shell: |
@@ -96,7 +99,7 @@
 
         - name: Windows | Eliminar servicios con sc.exe (no falla si no existen)
           ansible.windows.win_shell: |
-            $names = @({{ win_services_to_remove | to_json }})
+            $names = @("cloudResetPwdAgent","cloudResetPwdUpdateAgent")
             foreach ($n in $names) {
               cmd.exe /c "sc.exe stop $n" | Out-Null
               cmd.exe /c "sc.exe delete $n" | Out-Null
