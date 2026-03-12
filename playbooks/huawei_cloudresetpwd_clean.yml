@@ -142,7 +142,8 @@
 
         - name: Windows | Instalar plug-in (setup.bat)
           ansible.windows.win_shell: |
-            cmd.exe /c "{{ win_workdir }}\CloudResetPwdAgent\CloudResetPwdAgent.Windows\setup.bat"
+            cd "{{ win_workdir }}\CloudResetPwdAgent\CloudResetPwdAgent.Windows"
+            cmd.exe /c setup.bat
 
         - name: Windows | Validar que el servicio existe
           ansible.windows.win_shell: |
