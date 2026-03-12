@@ -130,9 +130,12 @@
             - (zip_sha_win.stdout | trim) != (plugin_zip_sha256_windows | lower)
 
         - name: Windows | Descomprimir ZIP
-          ansible.windows.win_unzip:
-            src: "{{ win_zip_path }}"
-            dest: "{{ win_workdir }}"
+          ansible.windows.win_shell: |
+            if (Test-Path "{{ win_workdir }}") {
+              Remove-Item "{{ win_workdir }}" -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            New-Item -ItemType Directory -Path "{{ win_workdir }}" -Force | Out-Null
+            Expand-Archive -Path "{{ win_zip_path }}" -DestinationPath "{{ win_workdir }}" -Force
 
         - name: Windows | Instalar plug-in (setup.bat)
           ansible.windows.win_shell: |
