@@ -1,6 +1,6 @@
 ---
 - name: Huawei CloudResetPwdAgent - Clean Reinstall (Multi-OS) via AAP Survey
-  hosts: huawei_ecs
+  hosts: all
   gather_facts: true
 
   vars:
