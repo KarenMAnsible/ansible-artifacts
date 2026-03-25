@@ -1,0 +1,68 @@
+---
+- name: Reporte CloudResetPwdAgent Linux
+  hosts: linux
+  gather_facts: yes
+  become: yes
+
+  tasks:
+    - name: Verificar carpeta del agente
+      stat:
+        path: /CloudrResetPwdAgent
+      register: agent_dir
+
+    - name: Verificar servicio
+      shell: |
+        systemctl is-active cloudResetPwdAgent 2>/dev/null || echo "not-found"
+      register: service_status
+      changed_when: false
+
+    - name: Obtener version desde release
+      shell: |
+        if [ -f /CloudrResetPwdAgent/depend/jre/release ]; then
+          grep JAVA_VERSION /CloudrResetPwdAgent/depend/jre/release | cut -d'=' -f2 | tr -d '"'
+        else
+          echo "NO_VERSION"
+        fi
+      register: version_info
+      changed_when: false
+
+    - name: Mostrar resultado
+      debug:
+        msg:
+          - "HOST: {{ inventory_hostname }}"
+          - "INSTALADO: {{ 'SI' if agent_dir.stat.exists else 'NO' }}"
+          - "SERVICIO: {{ service_status.stdout }}"
+          - "VERSION: {{ version_info.stdout }}"
+
+- name: Reporte CloudResetPwdAgent Windows
+  hosts: windows
+  gather_facts: yes
+
+  tasks:
+    - name: Verificar carpeta del agente
+      win_stat:
+        path: C:\CloudResetPwdAgent
+      register: agent_dir
+
+    - name: Verificar servicio
+      win_shell: |
+        $svc = Get-Service -Name "cloudResetPwdAgent" -ErrorAction SilentlyContinue
+        if ($svc) { $svc.Status } else { "not-found" }
+      register: service_status
+
+    - name: Obtener version desde release
+      win_shell: |
+        if (Test-Path "C:\CloudResetPwdAgent\depend\jre\release") {
+          Select-String "JAVA_VERSION" "C:\CloudResetPwdAgent\depend\jre\release"
+        } else {
+          "NO_VERSION"
+        }
+      register: version_info
+
+    - name: Mostrar resultado
+      debug:
+        msg:
+          - "HOST: {{ inventory_hostname }}"
+          - "INSTALADO: {{ 'SI' if agent_dir.stat.exists else 'NO' }}"
+          - "SERVICIO: {{ service_status.stdout }}"
+          - "VERSION: {{ version_info.stdout }}"
