@@ -6,8 +6,8 @@
 
   vars:
     ansible_connection: ssh
-    ansible_user: "{{ usuario }}"
-    ansible_password: "{{ password }}"
+    ansible_user: "{{ usuario | default('root') }}"
+    ansible_password: "{{ password | default('') }}"
     ansible_port: 22
     ansible_ssh_common_args: "-o StrictHostKeyChecking=no"
 
