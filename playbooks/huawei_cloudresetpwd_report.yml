@@ -6,8 +6,6 @@
 
   vars:
     ansible_connection: ssh
-    ansible_user: "{{ usuario | default('root') }}"
-    ansible_password: "{{ password | default('') }}"
     ansible_port: 22
     ansible_ssh_common_args: "-o StrictHostKeyChecking=no"
 
@@ -50,8 +48,6 @@
 
   vars:
     ansible_connection: winrm
-    ansible_user: "{{ usuario }}"
-    ansible_password: "{{ password }}"
     ansible_port: 5985
     ansible_winrm_transport: basic
     ansible_winrm_server_cert_validation: ignore
