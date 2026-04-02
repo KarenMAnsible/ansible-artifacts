@@ -2,11 +2,12 @@
 - name: Reporte CloudResetPwdAgent Linux
   hosts: linux
   gather_facts: yes
+ 
+ vars_files:
+    - /runner/project/inventories/huawei/vault_secrets.yml
+    - ../vars/vault.yml
   become: yes
  
-  vars_files:
-    - ../vars/vault.yml
-
   vars:
     ansible_connection: ssh
     ansible_port: 22
