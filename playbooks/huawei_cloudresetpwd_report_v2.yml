@@ -2,7 +2,7 @@
 - name: Reporte CloudResetPwdAgent Multi-OS
   hosts: all
   gather_facts: yes
-  become: yes
+
 
   vars:
     ansible_user: "{{ target_user }}"
