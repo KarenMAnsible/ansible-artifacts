@@ -1,0 +1,276 @@
+---
+- name: Reporte CloudResetPwdAgent Linux
+  hosts: linux
+  gather_facts: yes
+  become: yes
+
+  vars:
+    ansible_connection: ssh
+    ansible_port: 22
+    ansible_ssh_common_args: "-o StrictHostKeyChecking=no"
+    ansible_user: "{{ target_user }}"
+    ansible_password: "{{ target_password }}"
+    ansible_ssh_pass: "{{ target_password }}"
+    agent_path_linux: "/CloudrResetPwdAgent"
+    agent_service_name_linux: "cloudResetPwdAgent"
+    report_dir: "/tmp/reportes_huawei_agent"
+
+  tasks:
+    - name: Crear carpeta de reportes en controlador
+      delegate_to: localhost
+      become: no
+      file:
+        path: "{{ report_dir }}"
+        state: directory
+        mode: '0755'
+      run_once: true
+
+    - name: Verificar carpeta del agente Linux
+      stat:
+        path: "{{ agent_path_linux }}"
+      register: agent_dir
+
+    - name: Verificar servicio Linux
+      shell: |
+        if systemctl list-unit-files | grep -iq "{{ agent_service_name_linux }}"; then
+          systemctl is-active {{ agent_service_name_linux }} 2>/dev/null || true
+        else
+          echo "not-found"
+        fi
+      register: service_status
+      changed_when: false
+      failed_when: false
+
+    - name: Obtener status detallado Linux
+      shell: |
+        systemctl status {{ agent_service_name_linux }} --no-pager 2>/dev/null | sed -n '1,12p'
+      register: service_detail
+      changed_when: false
+      failed_when: false
+
+    - name: Buscar proceso Linux
+      shell: |
+        ps -ef | grep -i "{{ agent_service_name_linux }}" | grep -v grep
+      register: process_status
+      changed_when: false
+      failed_when: false
+
+    - name: Obtener version desde release Linux
+      shell: |
+        if [ -f "{{ agent_path_linux }}/depend/jre/release" ]; then
+          grep JAVA_VERSION "{{ agent_path_linux }}/depend/jre/release" | cut -d'=' -f2 | tr -d '"'
+        else
+          echo "NO_VERSION"
+        fi
+      register: version_info
+      changed_when: false
+      failed_when: false
+
+    - name: Definir reinstalacion Linux
+      set_fact:
+        reinstall_required: >-
+          {{
+            (not agent_dir.stat.exists)
+            or
+            ((service_status.stdout | trim) not in ['active'])
+            or
+            ((version_info.stdout | trim) == 'NO_VERSION')
+          }}
+
+    - name: Mostrar resultado Linux
+      debug:
+        msg:
+          - "HOST: {{ inventory_hostname }}"
+          - "IP: {{ ansible_host | default(inventory_hostname) }}"
+          - "INSTALADO: {{ 'SI' if agent_dir.stat.exists else 'NO' }}"
+          - "SERVICIO: {{ service_status.stdout | trim }}"
+          - "VERSION: {{ version_info.stdout | trim }}"
+          - "REINSTALAR: {{ reinstall_required }}"
+
+    - name: Guardar reporte individual Linux
+      delegate_to: localhost
+      become: no
+      copy:
+        dest: "{{ report_dir }}/{{ inventory_hostname }}_cloudresetpwdagent.txt"
+        mode: '0644'
+        content: |
+          ==================================================
+          REPORTE CLOUDRESETPWDAGENT LINUX
+          ==================================================
+          Host: {{ inventory_hostname }}
+          IP: {{ ansible_host | default(inventory_hostname) }}
+          Fecha: {{ ansible_date_time.date }} {{ ansible_date_time.time }}
+          SO: {{ ansible_distribution }} {{ ansible_distribution_version }}
+
+          ---- INSTALACION ----
+          Ruta agente: {{ agent_path_linux }}
+          Existe carpeta: {{ agent_dir.stat.exists }}
+
+          ---- SERVICIO ----
+          Nombre servicio: {{ agent_service_name_linux }}
+          Estado servicio: {{ service_status.stdout | trim }}
+
+          ---- VERSION ----
+          Version detectada: {{ version_info.stdout | trim }}
+
+          ---- PROCESO ----
+          {% if process_status.stdout is defined and (process_status.stdout | trim) != '' %}
+          {{ process_status.stdout }}
+          {% else %}
+          Proceso no detectado
+          {% endif %}
+
+          ---- STATUS DETALLADO ----
+          {% if service_detail.stdout is defined and (service_detail.stdout | trim) != '' %}
+          {{ service_detail.stdout }}
+          {% else %}
+          Sin detalle de systemctl
+          {% endif %}
+
+          ---- RESULTADO FINAL ----
+          Reinstalar: {{ reinstall_required }}
+
+    - name: Agregar resumen global Linux
+      delegate_to: localhost
+      become: no
+      lineinfile:
+        path: "{{ report_dir }}/resumen_global_cloudresetpwdagent.txt"
+        create: yes
+        mode: '0644'
+        line: "{{ inventory_hostname }} | SO=Linux | instalado={{ 'SI' if agent_dir.stat.exists else 'NO' }} | servicio={{ service_status.stdout | trim }} | version={{ version_info.stdout | trim }} | reinstalar={{ reinstall_required }}"
+
+- name: Reporte CloudResetPwdAgent Windows
+  hosts: windows
+  gather_facts: yes
+
+  vars:
+    ansible_connection: winrm
+    ansible_port: 5985
+    ansible_winrm_transport: basic
+    ansible_winrm_server_cert_validation: ignore
+    ansible_user: "{{ target_user }}"
+    ansible_password: "{{ target_password }}"
+    agent_path_windows: 'C:\CloudResetPwdAgent'
+    agent_service_name_windows: "cloudResetPwdAgent"
+    report_dir: "/tmp/reportes_huawei_agent"
+
+  tasks:
+    - name: Crear carpeta de reportes en controlador para Windows
+      delegate_to: localhost
+      become: no
+      file:
+        path: "{{ report_dir }}"
+        state: directory
+        mode: '0755'
+      run_once: true
+
+    - name: Verificar carpeta del agente Windows
+      win_stat:
+        path: "{{ agent_path_windows }}"
+      register: agent_dir
+
+    - name: Verificar servicio Windows
+      win_shell: |
+        $svc = Get-Service -Name "{{ agent_service_name_windows }}" -ErrorAction SilentlyContinue
+        if ($svc) {
+          $svc.Status
+        } else {
+          "not-found"
+        }
+      register: service_status
+      changed_when: false
+      failed_when: false
+
+    - name: Obtener version desde release Windows
+      win_shell: |
+        if (Test-Path "{{ agent_path_windows }}\depend\jre\release") {
+          $line = Select-String -Path "{{ agent_path_windows }}\depend\jre\release" -Pattern "JAVA_VERSION" | Select-Object -First 1
+          if ($line) {
+            ($line.Line -split "=")[1].Replace('"','').Trim()
+          } else {
+            "NO_VERSION"
+          }
+        } else {
+          "NO_VERSION"
+        }
+      register: version_info
+      changed_when: false
+      failed_when: false
+
+    - name: Obtener detalle del servicio Windows
+      win_shell: |
+        $svc = Get-Service -Name "{{ agent_service_name_windows }}" -ErrorAction SilentlyContinue
+        if ($svc) {
+          $svc | Format-List Name,Status,DisplayName | Out-String
+        } else {
+          "Sin detalle del servicio"
+        }
+      register: service_detail
+      changed_when: false
+      failed_when: false
+
+    - name: Definir reinstalacion Windows
+      set_fact:
+        reinstall_required: >-
+          {{
+            (not agent_dir.stat.exists)
+            or
+            ((service_status.stdout | trim | lower) not in ['running'])
+            or
+            ((version_info.stdout | trim) == 'NO_VERSION')
+          }}
+
+    - name: Mostrar resultado Windows
+      debug:
+        msg:
+          - "HOST: {{ inventory_hostname }}"
+          - "IP: {{ ansible_host | default(inventory_hostname) }}"
+          - "INSTALADO: {{ 'SI' if agent_dir.stat.exists else 'NO' }}"
+          - "SERVICIO: {{ service_status.stdout | trim }}"
+          - "VERSION: {{ version_info.stdout | trim }}"
+          - "REINSTALAR: {{ reinstall_required }}"
+
+    - name: Guardar reporte individual Windows
+      delegate_to: localhost
+      become: no
+      copy:
+        dest: "{{ report_dir }}/{{ inventory_hostname }}_cloudresetpwdagent.txt"
+        mode: '0644'
+        content: |
+          ==================================================
+          REPORTE CLOUDRESETPWDAGENT WINDOWS
+          ==================================================
+          Host: {{ inventory_hostname }}
+          IP: {{ ansible_host | default(inventory_hostname) }}
+          Fecha: {{ ansible_date_time.date }} {{ ansible_date_time.time }}
+          SO: Windows
+
+          ---- INSTALACION ----
+          Ruta agente: {{ agent_path_windows }}
+          Existe carpeta: {{ agent_dir.stat.exists }}
+
+          ---- SERVICIO ----
+          Nombre servicio: {{ agent_service_name_windows }}
+          Estado servicio: {{ service_status.stdout | trim }}
+
+          ---- VERSION ----
+          Version detectada: {{ version_info.stdout | trim }}
+
+          ---- DETALLE SERVICIO ----
+          {% if service_detail.stdout is defined and (service_detail.stdout | trim) != '' %}
+          {{ service_detail.stdout }}
+          {% else %}
+          Sin detalle
+          {% endif %}
+
+          ---- RESULTADO FINAL ----
+          Reinstalar: {{ reinstall_required }}
+
+    - name: Agregar resumen global Windows
+      delegate_to: localhost
+      become: no
+      lineinfile:
+        path: "{{ report_dir }}/resumen_global_cloudresetpwdagent.txt"
+        create: yes
+        mode: '0644'
+        line: "{{ inventory_hostname }} | SO=Windows | instalado={{ 'SI' if agent_dir.stat.exists else 'NO' }} | servicio={{ service_status.stdout | trim }} | version={{ version_info.stdout | trim }} | reinstalar={{ reinstall_required }}"
