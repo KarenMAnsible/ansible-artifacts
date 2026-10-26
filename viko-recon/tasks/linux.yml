@@ -1,0 +1,40 @@
+---
+- name: Detectar Python 3 sin depender de gather_facts
+  ansible.builtin.raw: |
+    p=$(command -v python3 2>/dev/null) || exit 3
+    "$p" -B -c 'import sys; print("VIKO_PY=" + sys.executable) if sys.version_info >= (3,6) else sys.exit(4)'
+  register: _vuln_python
+  become: "{{ (vuln_become | default(vuln_defaults_become)) | bool }}"
+  changed_when: false
+  failed_when: false
+  timeout: 30
+
+- name: Registrar conectividad o requisito faltante
+  ansible.builtin.set_fact:
+    _vuln_raw:
+      status: no_evaluado
+      reason: "{{ 'Sin conexión SSH o credencial válida' if _vuln_python.unreachable | default(false) else 'Se requiere Python 3.6 o superior; no se instaló ningún paquete' }}"
+
+- name: Recolectar evidencia Linux
+  ansible.builtin.raw: |
+    {{ (_vuln_python.stdout | regex_findall('VIKO_PY=([^\r\n]+)') | first) | quote }} -B - {{ _vuln_config | to_json | b64encode | quote }} <<'VIKO_RECON_PY'
+    {{ lookup('ansible.builtin.file', playbook_dir ~ '/scripts/collect_linux.py') }}
+    VIKO_RECON_PY
+  register: _vuln_collector
+  become: "{{ (vuln_become | default(vuln_defaults_become)) | bool }}"
+  changed_when: false
+  failed_when: false
+  timeout: "{{ (vuln_task_timeout | default(vuln_defaults_task_timeout)) | int }}"
+  no_log: true
+  when:
+    - not (_vuln_python.unreachable | default(false))
+    - _vuln_python.stdout | default('') | regex_search('VIKO_PY=') is not none
+
+- name: Incorporar evidencia válida Linux
+  ansible.builtin.set_fact:
+    _vuln_raw: "{{ (_vuln_collector.stdout | regex_findall('VIKO_VULN_JSON:([^\r\n]+)') | last) | from_json }}"
+  no_log: true
+  when:
+    - not (_vuln_collector.skipped | default(false))
+    - not (_vuln_collector.unreachable | default(false))
+    - _vuln_collector.stdout | default('') | regex_search('VIKO_VULN_JSON:') is not none

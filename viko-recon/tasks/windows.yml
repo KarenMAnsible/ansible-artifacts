@@ -1,0 +1,53 @@
+---
+- name: Recolectar evidencia Windows con PowerShell
+  ansible.windows.win_shell: |
+    $ErrorActionPreference = 'Stop'
+    $scriptText = @'
+    $config = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{{ _vuln_config | to_json | b64encode }}')) | ConvertFrom-Json
+    {{ lookup('ansible.builtin.file', playbook_dir ~ '/scripts/collect_windows.ps1') }}
+    '@
+    $launcher = '[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); $s=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([Console]::In.ReadToEnd())); & ([scriptblock]::Create($s))'
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($launcher))
+    $p = New-Object Diagnostics.Process
+    $p.StartInfo = [Diagnostics.ProcessStartInfo]::new("$PSHOME\powershell.exe", "-NoProfile -NonInteractive -EncodedCommand $encoded")
+    $p.StartInfo.UseShellExecute = $false
+    $p.StartInfo.RedirectStandardOutput = $true
+    $p.StartInfo.RedirectStandardError = $true
+    $p.StartInfo.RedirectStandardInput = $true
+    $p.StartInfo.StandardOutputEncoding = [Text.Encoding]::UTF8
+    $p.StartInfo.CreateNoWindow = $true
+    try {
+        [void]$p.Start()
+        $read = $p.StandardOutput.ReadToEndAsync()
+        $err = $p.StandardError.ReadToEndAsync()
+        $p.StandardInput.WriteLine([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($scriptText)))
+        $p.StandardInput.Close()
+        if (-not $p.WaitForExit({{ (((vuln_scan_seconds | default(vuln_defaults_scan_seconds)) | int) + 20) * 1000 }})) {
+            $p.Kill()
+            [Console]::WriteLine('VIKO_VULN_JSON:{"status":"no_evaluado","reason":"Tiempo máximo del proceso Windows; reintentar con rutas más específicas"}')
+        } else {
+            [Console]::Write($read.GetAwaiter().GetResult())
+            [void]$err.GetAwaiter().GetResult()
+        }
+    } finally { $p.Dispose() }
+  args:
+    no_profile: true
+  register: _vuln_collector
+  changed_when: false
+  failed_when: false
+  timeout: "{{ (vuln_task_timeout | default(vuln_defaults_task_timeout)) | int }}"
+  no_log: true
+
+- name: Registrar conectividad o fallo Windows
+  ansible.builtin.set_fact:
+    _vuln_raw:
+      status: no_evaluado
+      reason: "{{ 'Sin conexión Windows o credencial válida' if _vuln_collector.unreachable | default(false) else 'El recolector Windows no devolvió evidencia válida' }}"
+
+- name: Incorporar evidencia válida Windows
+  ansible.builtin.set_fact:
+    _vuln_raw: "{{ (_vuln_collector.stdout | regex_findall('VIKO_VULN_JSON:([^\r\n]+)') | last) | from_json }}"
+  no_log: true
+  when:
+    - not (_vuln_collector.unreachable | default(false))
+    - _vuln_collector.stdout | default('') | regex_search('VIKO_VULN_JSON:') is not none

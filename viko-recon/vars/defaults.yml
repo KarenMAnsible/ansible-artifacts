@@ -1,0 +1,63 @@
+---
+# Se ejecutan las familias indicadas; no use --tags para seleccionar familias.
+vuln_defaults_checks: [php, log4j, struts]
+vuln_defaults_become: false
+vuln_defaults_scan_seconds: 180
+vuln_defaults_task_timeout: 240
+vuln_defaults_command_timeout: 10
+vuln_defaults_max_files: 100000
+vuln_defaults_max_archives: 1500
+vuln_defaults_max_archive_mb: 128
+vuln_defaults_max_nested_mb: 32
+vuln_defaults_max_total_nested_mb: 128
+vuln_defaults_max_entries: 50000
+vuln_defaults_archive_depth: 2
+vuln_defaults_max_observations: 2000
+vuln_defaults_run_php_version: true
+vuln_defaults_container_inventory: true
+vuln_defaults_follow_mounts: false
+vuln_defaults_linux_roots:
+  - /usr/sap
+  - /opt/instana
+  - /opt/instana-agent
+  - /opt
+  - /usr/share
+  - /usr/lib
+  - /usr/lib64
+  - /usr/local
+  - /srv
+  - /var/www
+  - /var/lib/tomcat
+  - /var/lib/jetty
+vuln_defaults_linux_excludes:
+  - /proc
+  - /sys
+  - /dev
+  - /run
+  - /var/lib/docker
+  - /var/lib/containers
+  - /var/lib/kubelet
+vuln_defaults_windows_roots:
+  - 'C:\usr\sap'
+  - 'C:\SAP'
+  - 'C:\Program Files\SAP'
+  - 'C:\Program Files (x86)\SAP'
+  - 'C:\Program Files\Instana'
+  - 'C:\Program Files (x86)\Instana'
+  - 'C:\Instana'
+  - 'C:\Program Files'
+  - 'C:\Program Files (x86)'
+  - 'C:\inetpub'
+  - 'C:\xampp'
+  - 'C:\wamp64'
+  - 'C:\PHP'
+  - 'C:\SAP'
+  - 'C:\CloudResetPwdAgent'
+  - 'C:\CloudResetPwdUpdateAgent'
+vuln_defaults_windows_excludes:
+  - 'C:\Windows'
+  - 'C:\ProgramData\Microsoft\Windows Defender'
+# Agregue explícitamente volúmenes/rutas de aplicaciones que falten.
+# En AAP estas variables deben estar en el inventario/grupo/host o en Extra vars.
+vuln_defaults_report_dir: ''
+vuln_defaults_aap_artifact_max_bytes: 700000
