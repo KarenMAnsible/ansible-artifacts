@@ -338,13 +338,18 @@ def per_server_texts(report):
         return value[:limit] or 'sin_dato'
 
     instant = report_datetime(report['generated_utc'])
-    stamp = instant.astimezone(MEXICO_TZ).strftime('%Y%m%d_%H%M%S_%f_CDMX') if instant else 'fecha_no_registrada'
+    stamp = instant.astimezone(MEXICO_TZ).strftime('%Y%m%d_%H%M%S') if instant else 'fecha_no_registrada'
     files = {}
     for host in report['hosts']:
         identity = host['system'].get('hostname') or host['host']
         ips = server_ips(host)
-        suffix = hashlib.sha256((host['host'] + '\0' + host.get('address', '')).encode()).hexdigest()[:8]
-        name = 'por_servidor/recon_{}_{}_{}_{}.txt'.format(slug(identity, 48), slug(ips[0] if ips else 'IP_no_registrada', 42), stamp, suffix)
+        basename = '{}_{}_{}.txt'.format(slug(identity, 48), slug(ips[0] if ips else 'IP_no_registrada', 42), stamp)
+        name = 'por_servidor/' + basename
+        if name in files:
+            folder = hashlib.sha256((host['host'] + '\0' + host.get('address', '')).encode()).hexdigest()
+            name = 'por_servidor/{}/{}'.format(folder, basename)
+            if name in files:
+                raise ValueError('Objetivo duplicado: ' + host['host'])
         findings = [f for f in report['findings'] if f['host'] == host['host']]
         single = dict(report, hosts=[host], findings=findings)
         single['summary'] = {
