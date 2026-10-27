@@ -147,6 +147,8 @@
           - "{{ _vuln_out_dir }}/entrada.json"
           - --out
           - "{{ _vuln_out_dir }}"
+          - --txt-dir
+          - "{{ vuln_txt_dir | default('') }}"
           - --artifact-limit
           - "{{ (vuln_aap_artifact_max_bytes | default(vuln_defaults_aap_artifact_max_bytes)) | string }}"
       register: _vuln_report

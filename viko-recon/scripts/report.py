@@ -17,6 +17,7 @@ import os
 from pathlib import Path
 import re
 import sys
+import tempfile
 import zipfile
 
 HERE = Path(__file__).resolve().parent
@@ -364,7 +365,40 @@ def per_server_texts(report):
     return files
 
 
-def write_reports(report, out):
+def publish_texts(texts, directory):
+    """Publish complete TXT files in one folder without replacing other reports."""
+    destination = Path(directory)
+    destination.mkdir(mode=0o700, parents=True, exist_ok=True)
+    flat = {}
+    for name, data in texts.items():
+        basename = Path(name).name
+        if basename in flat and flat[basename] != data:
+            raise FileExistsError('Dos reportes diferentes tienen el mismo nombre: ' + basename)
+        flat[basename] = data
+    for basename, data in flat.items():
+        target = destination / basename
+        if target.is_symlink():
+            raise FileExistsError('El destino TXT es un enlace: ' + basename)
+        if target.exists() and target.read_bytes() != data:
+            raise FileExistsError('Se conserva el TXT existente con contenido diferente: ' + basename)
+    for basename, data in flat.items():
+        target = destination / basename
+        fd, temporary = tempfile.mkstemp(prefix='.viko-txt-', dir=str(destination))
+        try:
+            with os.fdopen(fd, 'wb') as stream:
+                stream.write(data)
+                stream.flush()
+                os.fsync(stream.fileno())
+            try:
+                os.link(temporary, str(target))
+            except FileExistsError:
+                if target.is_symlink() or target.read_bytes() != data:
+                    raise FileExistsError('Se conserva el TXT existente con contenido diferente: ' + basename)
+        finally:
+            os.unlink(temporary)
+    return len(flat)
+
+def write_reports(report, out, txt_dir=''):
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
     hosts = []
@@ -396,6 +430,8 @@ def write_reports(report, out):
     p = out / 'resultados.zip'
     p.write_bytes(bundle)
     os.chmod(str(p), 0o600)
+    if txt_dir:
+        publish_texts(per_server_texts(report), txt_dir)
     return base64.b64encode(bundle).decode('ascii')
 
 
@@ -405,6 +441,7 @@ def main():
     g.add_argument('--input', help='Entrada consolidada privada producida por Ansible')
     g.add_argument('--restore-artifacts', help='JSON exportado del Job AAP o su objeto artifacts')
     p.add_argument('--out', required=True)
+    p.add_argument('--txt-dir', default='', help='Carpeta común de TXT individuales')
     p.add_argument('--artifact-limit', type=int, default=700000)
     args = p.parse_args()
     os.umask(0o077)
@@ -440,11 +477,13 @@ def main():
             target = out / name
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(content)
+        if args.txt_dir:
+            publish_texts(per_server_texts(restored_report), args.txt_dir)
         print('Reportes recuperados en ' + str(out))
         return
     payload = json.loads(Path(args.input).read_text(encoding='utf-8'))
     report = build_report(payload)
-    encoded = write_reports(report, args.out)
+    encoded = write_reports(report, args.out, args.txt_dir)
     include = len(encoded.encode('ascii')) <= args.artifact_limit
     artifact = {'viko_vuln_summary': report['summary'], 'viko_vuln_rules_reviewed_on': RULESET['reviewed_on'],
                 'viko_vuln_report_dir': str(args.out),
