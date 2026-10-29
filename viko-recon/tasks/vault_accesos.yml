@@ -1,0 +1,61 @@
+---
+- name: Cargar acceso cifrado de reconocimiento
+  ansible.builtin.include_vars:
+    file: "{{ playbook_dir }}/../group_vars/all/vault.yml"
+    name: _viko_access_file
+  no_log: true
+
+- name: Seleccionar registro por alias exacto
+  ansible.builtin.set_fact:
+    _viko_access: "{{ _viko_access_file.viko_assessment_access.get(inventory_hostname, {}) }}"
+  no_log: true
+
+- name: Exigir un acceso importado y listo
+  ansible.builtin.assert:
+    that:
+      - _viko_access is mapping
+      - _viko_access.status | default('pendiente') == 'listo'
+      - _viko_access.mode | default('') in ['password', 'key']
+      - _viko_access.family | default('') in ['linux', 'windows']
+    fail_msg: 'Alias sin acceso listo en Vault; revisar el resumen de importación.'
+  no_log: true
+
+- name: Conservar protocolo compatible con el sistema
+  ansible.builtin.assert:
+    that:
+      - (_viko_access.family == 'windows' and (ansible_connection | default('winrm')) in ['winrm', 'psrp']) or (_viko_access.family == 'linux' and (ansible_connection | default('ssh')) in ['ssh', 'paramiko', 'ansible.builtin.ssh', 'ansible.builtin.paramiko'])
+    fail_msg: 'El protocolo del inventario no coincide con el sistema del Excel.'
+  no_log: true
+
+- name: Vincular datos del Excel y conservar puertos particulares
+  ansible.builtin.set_fact:
+    ansible_host: "{{ _viko_access.address }}"
+    ansible_user: "{{ _viko_access.user }}"
+    ansible_connection: "{{ ansible_connection | default('winrm' if _viko_access.family == 'windows' else 'ssh') }}"
+    ansible_port: "{{ _viko_access.port | default(ansible_port | default(5985 if _viko_access.family == 'windows' else 22)) | int }}"
+    vuln_customer: "{{ _viko_access.customer }}"
+  no_log: true
+
+- name: Vincular contraseña únicamente para accesos por contraseña
+  ansible.builtin.set_fact:
+    ansible_password: "{{ _viko_access.password }}"
+    ansible_ssh_pass: "{{ _viko_access.password }}"
+  when: _viko_access.mode == 'password'
+  no_log: true
+
+- name: Detectar variables de encuesta que sustituyan al Vault
+  ansible.builtin.assert:
+    that:
+      - (ansible_host | string) == (_viko_access.address | string)
+      - (ansible_ssh_host | default(_viko_access.address) | string) == (_viko_access.address | string)
+      - (ansible_user | string) == (_viko_access.user | string)
+      - (ansible_ssh_user | default(_viko_access.user) | string) == (_viko_access.user | string)
+      - (_viko_access.port is not defined) or (ansible_port | int) == (_viko_access.port | int)
+      - (_viko_access.port is not defined) or (ansible_ssh_port | default(_viko_access.port) | int) == (_viko_access.port | int)
+      - _viko_access.mode != 'password' or (ansible_password | string) == (_viko_access.password | string)
+      - _viko_access.mode != 'password' or (ansible_ssh_pass | string) == (_viko_access.password | string)
+      - _viko_access.family != 'windows' or (ansible_winrm_user | default(_viko_access.user) | string) == (_viko_access.user | string)
+      - _viko_access.family != 'windows' or _viko_access.mode != 'password' or (ansible_winrm_password | default(_viko_access.password) | string) == (_viko_access.password | string)
+      - _viko_access.mode != 'key' or ((ansible_password | default('') | string) | length == 0 and (ansible_ssh_pass | default('') | string) | length == 0)
+    fail_msg: 'Variables de acceso contradictorias. Desactivar encuesta de usuario/contraseña y revisar extra vars.'
+  no_log: true

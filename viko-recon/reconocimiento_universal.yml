@@ -7,6 +7,12 @@
   vars_files:
     - vars/defaults.yml
   tasks:
+    # VIKO_VAULT_ACCESOS_V1
+    - name: Preparar acceso desde Vault cuando se solicita
+      ansible.builtin.include_tasks: tasks/vault_accesos.yml
+      when: vuln_use_vault | default(false) | bool
+      tags: always
+
     - name: Validar selección de familias
       ansible.builtin.assert:
         that:
