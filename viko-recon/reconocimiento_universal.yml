@@ -16,6 +16,7 @@
           - (vuln_checks | default(vuln_defaults_checks)) | length > 0
           - (vuln_checks | default(vuln_defaults_checks)) | difference(['php', 'log4j', 'struts']) | length == 0
           - not ansible_check_mode
+          - not (vuln_php_inventory_only | default(false) | bool) or (vuln_checks | default(vuln_defaults_checks)) == ['php']
         fail_msg: 'Use (vuln_checks | default(vuln_defaults_checks)): [php, log4j, struts]. Ejecute normalmente: --check no realiza este reconocimiento.'
       run_once: true
 
@@ -33,13 +34,6 @@
           - (vuln_archive_depth | default(vuln_defaults_archive_depth) | int) >= 0
           - (vuln_archive_depth | default(vuln_defaults_archive_depth) | int) <= 5
         fail_msg: 'Límites inválidos: task_timeout debe superar scan_seconds al menos 40 segundos.'
-
-    - name: Guardar todos los objetivos, incluidos los que no respondan
-      ansible.builtin.set_fact:
-        _vuln_target_hosts: "{{ ansible_play_hosts_all }}"
-      delegate_to: localhost
-      delegate_facts: true
-      run_once: true
 
     - name: Inicializar resultado y plataforma según conexión del inventario
       ansible.builtin.set_fact:
@@ -59,6 +53,7 @@
           max_entries: "{{ (vuln_max_entries | default(vuln_defaults_max_entries)) | int }}"
           archive_depth: "{{ (vuln_archive_depth | default(vuln_defaults_archive_depth)) | int }}"
           max_observations: "{{ (vuln_max_observations | default(vuln_defaults_max_observations)) | int }}"
+          php_inventory_only: "{{ vuln_php_inventory_only | default(false) | bool }}"
           run_php_version: "{{ (vuln_run_php_version | default(vuln_defaults_run_php_version)) | bool }}"
           container_inventory: "{{ (vuln_container_inventory | default(vuln_defaults_container_inventory)) | bool }}"
           follow_mounts: "{{ (vuln_follow_mounts | default(vuln_defaults_follow_mounts)) | bool }}"
@@ -77,6 +72,9 @@
             _vuln_raw:
               status: no_evaluado
               reason: Error o timeout del recolector; revisar el evento fallido del Job.
+              diagnostics:
+                stage: ansible_collection
+                code: task_failed_or_timeout
 
     - name: Mostrar únicamente resumen de recolección por equipo
       ansible.builtin.debug:
@@ -86,91 +84,98 @@
           componentes: "{{ _vuln_raw.observations | default([]) | length }}"
           cobertura: "{{ _vuln_raw.coverage.file_search | default('no_evaluado') }}"
 
-- name: VIKO | Consolidar evidencia y publicar artefactos AAP
-  hosts: localhost
-  connection: local
-  gather_facts: false
-  vars_files:
-    - vars/defaults.yml
-  tasks:
-    - name: Exigir objetivos válidos
-      ansible.builtin.assert:
-        that: hostvars['localhost']._vuln_target_hosts | default([]) | length > 0
-        fail_msg: 'No se seleccionaron equipos. Revise inventario, vuln_target y Limit. Incluya localhost en Limit.'
+    - name: Consolidar evidencia en el entorno de ejecución
+      run_once: true
+      delegate_to: localhost
+      become: false
+      vars:
+        ansible_connection: local
+        ansible_python_interpreter: "{{ ansible_playbook_python }}"
+      block:
+        - name: Exigir objetivos válidos
+          ansible.builtin.assert:
+            that: ansible_play_hosts_all | default([]) | length > 0
+            fail_msg: 'No se seleccionaron equipos. Revise inventario, vuln_target y Limit.'
 
-    - name: Crear directorio privado temporal de resultados
-      ansible.builtin.tempfile:
-        state: directory
-        prefix: viko-recon-
-      register: _vuln_temp
-      when: (vuln_report_dir | default(vuln_defaults_report_dir)) | length == 0
+        - name: Crear directorio privado temporal de resultados
+          ansible.builtin.tempfile:
+            state: directory
+            prefix: viko-recon-
+          register: _vuln_temp
+          when: (vuln_report_dir | default(vuln_defaults_report_dir)) | length == 0
 
-    - name: Seleccionar directorio de esta ejecución
-      ansible.builtin.set_fact:
-        _vuln_out_dir: "{{ (vuln_report_dir | default(vuln_defaults_report_dir)) if (vuln_report_dir | default(vuln_defaults_report_dir)) | length > 0 else _vuln_temp.path }}"
-        _vuln_input: []
+        - name: Seleccionar directorio de esta ejecución
+          ansible.builtin.set_fact:
+            _vuln_out_dir: "{{ (vuln_report_dir | default(vuln_defaults_report_dir)) if (vuln_report_dir | default(vuln_defaults_report_dir)) | length > 0 else _vuln_temp.path }}"
+            _vuln_input: []
 
-    - name: Preparar directorio de resultados
-      ansible.builtin.file:
-        path: "{{ _vuln_out_dir }}"
-        state: directory
-        mode: '0700'
+        - name: Preparar directorio de resultados
+          ansible.builtin.file:
+            path: "{{ _vuln_out_dir }}"
+            state: directory
+            mode: '0700'
 
-    - name: Consolidar todos los objetivos
-      ansible.builtin.set_fact:
-        _vuln_input: >-
-          {{ _vuln_input + [{
-            'host': item,
-            'address': hostvars[item].ansible_host | default(item),
-            'customer': hostvars[item].vuln_customer | default('SIN_ASIGNAR'),
-            'security_coverage': hostvars[item].vuln_security_coverage | default('desconocido'),
-            'security_coverage_source': hostvars[item].vuln_security_coverage_source | default(''),
-            'vendor_evidence': hostvars[item].vuln_vendor_evidence | default([]),
-            'raw': hostvars[item]._vuln_raw | default({'status':'no_evaluado','reason':'No se recibió evidencia'})
-          }] }}
-      loop: "{{ hostvars['localhost']._vuln_target_hosts }}"
-      no_log: true
+        - name: Consolidar todos los objetivos
+          ansible.builtin.set_fact:
+            _vuln_input: >-
+              {{ _vuln_input + [{
+                'host': item,
+                'address': hostvars[item].ansible_host | default(item),
+                'customer': hostvars[item].vuln_customer | default('SIN_ASIGNAR'),
+                'security_coverage': hostvars[item].vuln_security_coverage | default('desconocido'),
+                'security_coverage_source': hostvars[item].vuln_security_coverage_source | default(''),
+                'vendor_evidence': hostvars[item].vuln_vendor_evidence | default([]),
+                'raw': hostvars[item]._vuln_raw | default({'status':'no_evaluado','reason':'No se recibió evidencia'})
+              }] }}
+          loop: "{{ ansible_play_hosts_all }}"
+          no_log: true
 
-    - name: Escribir entrada privada para consolidación
-      ansible.builtin.copy:
-        content: "{{ {'checks': (vuln_checks | default(vuln_defaults_checks)), 'hosts': _vuln_input} | to_nice_json }}"
-        dest: "{{ _vuln_out_dir }}/entrada.json"
-        mode: '0600'
-      no_log: true
+        - name: Escribir entrada privada para consolidación
+          ansible.builtin.copy:
+            content: "{{ {'checks': (vuln_checks | default(vuln_defaults_checks)), 'hosts': _vuln_input} | to_nice_json }}"
+            dest: "{{ _vuln_out_dir }}/entrada.json"
+            mode: '0600'
+          no_log: true
 
-    - name: Clasificar y generar TXT, JSON, CSV, HTML y paquete recuperable
-      ansible.builtin.command:
-        argv:
-          - "{{ ansible_playbook_python }}"
-          - "{{ playbook_dir }}/scripts/report.py"
-          - --input
-          - "{{ _vuln_out_dir }}/entrada.json"
-          - --out
-          - "{{ _vuln_out_dir }}"
-          - --txt-dir
-          - "{{ vuln_txt_dir | default('') }}"
-          - --artifact-limit
-          - "{{ (vuln_aap_artifact_max_bytes | default(vuln_defaults_aap_artifact_max_bytes)) | string }}"
-      register: _vuln_report
-      timeout: 90
-      changed_when: false
-      no_log: true
+        - name: Clasificar y generar TXT, JSON, CSV, HTML y paquete recuperable
+          ansible.builtin.command:
+            argv:
+              - "{{ ansible_playbook_python }}"
+              - "{{ playbook_dir }}/scripts/report.py"
+              - --input
+              - "{{ _vuln_out_dir }}/entrada.json"
+              - --out
+              - "{{ _vuln_out_dir }}"
+              - --txt-dir
+              - "{{ vuln_txt_dir | default('') }}"
+              - --artifact-limit
+              - "{{ (vuln_aap_artifact_max_bytes | default(vuln_defaults_aap_artifact_max_bytes)) | string }}"
+          register: _vuln_report
+          timeout: 90
+          changed_when: false
+          no_log: true
 
-    - name: Preparar artefactos
-      ansible.builtin.set_fact:
-        _vuln_artifacts: "{{ _vuln_report.stdout | from_json }}"
-      no_log: true
+        - name: Preparar artefactos
+          ansible.builtin.set_fact:
+            _vuln_artifacts: "{{ _vuln_report.stdout | from_json }}"
+          no_log: true
 
-    - name: Publicar resultados en los artefactos del Job
-      ansible.builtin.set_stats:
-        data: "{{ _vuln_artifacts }}"
-        per_host: false
-        aggregate: false
+        - name: Publicar resultados en los artefactos del Job
+          ansible.builtin.set_stats:
+            data: "{{ _vuln_artifacts }}"
+            per_host: false
+            aggregate: false
 
-    - name: Mostrar resumen y disponibilidad del reporte completo
-      ansible.builtin.debug:
-        msg:
-          resumen: "{{ _vuln_artifacts.viko_vuln_summary }}"
-          directorio: "{{ _vuln_out_dir }}"
-          reporte_en_artefactos: "{{ _vuln_artifacts.viko_vuln_bundle_status }}"
-          aviso: 'En AAP descargue artifacts antes de perder acceso al Job. Los archivos del EE son temporales, salvo montaje persistente configurado.'
+        - name: Mostrar resumen y disponibilidad del reporte completo
+          ansible.builtin.debug:
+            msg:
+              resumen: "{{ _vuln_artifacts.viko_vuln_summary }}"
+              directorio: "{{ _vuln_out_dir }}"
+              reporte_en_artefactos: "{{ _vuln_artifacts.viko_vuln_bundle_status }}"
+              aviso: 'En AAP descargue artifacts antes de perder acceso al Job. Los archivos del EE son temporales, salvo montaje persistente configurado.'
+
+        - name: Exigir evidencia en todos los equipos del piloto cuando se solicita
+          ansible.builtin.assert:
+            that: _vuln_artifacts.viko_vuln_summary.hosts_not_evaluated | int == 0
+            fail_msg: 'Se guardaron los reportes, pero hay equipos sin evidencia. Revisar diagnóstico antes de ampliar las corridas.'
+          when: vuln_fail_no_evidence | default(false) | bool

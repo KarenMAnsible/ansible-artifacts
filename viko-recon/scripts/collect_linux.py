@@ -38,6 +38,7 @@ class Collector:
         self.completed_roots = []
         self.missing_roots = []
         self.budget_exhausted = False
+        self.php_inventory = None
 
     def problem(self, location, reason):
         self.error_count += 1
@@ -304,13 +305,19 @@ class Collector:
                 continue
             name, version, arch = cols
             if re.match(r'^(?:php(?:\d+(?:\.\d+)*)?-)?php(?:\d+(?:\.\d+)*)?(?:-(?:cli|fpm|cgi|common))?$', name) or re.match(r'^libapache2-mod-php[\d.]*$', name):
-                m = re.search(r'(\d+\.\d+(?:\.\d+)?)', re.sub(r'^\d+:', '', version))
+                # Anchor after the epoch. A metapackage such as
+                # 2:101~+ubuntu24.04.1 must never become PHP 24.04.1.
+                m = re.match(r'(\d+\.\d+\.\d+)(?=$|[-+~.])', re.sub(r'^\d+:', '', version))
                 self.add('php', 'package:' + name, m.group(1) if m else '', 'package_db', package=name, package_version=version, architecture=arch, package_manager=manager)
 
     def php(self):
+        start_errors = self.error_count
         self.packages()
         candidates = []
-        for pattern in ('/usr/bin/php*', '/usr/local/bin/php*', '/opt/remi/php*/root/usr/bin/php', '/opt/plesk/php/*/bin/php'):
+        patterns = ('/usr/bin/php*', '/usr/local/bin/php*', '/opt/remi/php*/root/usr/bin/php',
+                    '/opt/plesk/php/*/bin/php', '/opt/rh/rh-php*/root/usr/bin/php',
+                    '/usr/local/php*/bin/php', '/opt/php*/bin/php')
+        for pattern in patterns:
             candidates.extend(glob.glob(pattern))
         if shutil.which('php'):
             candidates.append(shutil.which('php'))
@@ -332,6 +339,12 @@ class Collector:
                 m = re.search(r'^PHP\s+(\S+)', text or '', re.M)
                 version = m.group(1) if m else ''
             self.add('php', p, version, 'php_cli_no_ini' if version else 'binary_without_version')
+        self.php_inventory = {
+            'status': 'parcial' if self.error_count > start_errors or self.expired() else 'completado_en_fuentes',
+            'sources': ['base de paquetes instalada', 'PHP CLI en PATH y patrones configurados'],
+            'binary_patterns': list(patterns), 'cli_binaries_checked': len(seen),
+            'runtime_web': 'pendiente_de_correlacion',
+            'note': 'El inventario de paquetes/CLI no acredita ausencia de PHP en aplicaciones, módulos Apache o contenedores.'}
 
     def context(self):
         services = []
@@ -398,19 +411,29 @@ class Collector:
                 except ValueError:
                     pass
             services, processes, trend, containers = self.context()
-            self.walk()
+            if not self.c.get('php_inventory_only', False):
+                self.walk()
         except ScanDeadline:
             self.budget_exhausted = True
             self.problem('servidor', 'tiempo_maximo_recolector')
         finally:
             signal.setitimer(signal.ITIMER_REAL, 0)
             signal.signal(signal.SIGALRM, previous_handler)
-        return {'schema_version': 1, 'status': 'recolectado', 'platform': 'linux', 'system': system,
+        file_search = ('no_solicitado' if self.c.get('php_inventory_only', False) else
+                       ('parcial' if self.error_count or self.budget_exhausted else
+                        ('completado_en_rutas' if self.completed_roots else 'sin_rutas_revisadas')))
+        families = {}
+        for family in self.c.get('checks', []):
+            if family == 'php':
+                families[family] = self.php_inventory or {'status': 'no_evaluado', 'runtime_web': 'pendiente_de_correlacion'}
+            else:
+                families[family] = {'status': file_search, 'sources': ['archivos en raíces configuradas']}
+        return {'schema_version': 1, 'collector_version': '1.5-piloto', 'status': 'recolectado', 'platform': 'linux', 'system': system,
                 'timestamp_utc': datetime.datetime.now(datetime.timezone.utc).isoformat(),
                 'observations': self.observations, 'services': services, 'processes': processes,
                 'trend_local': trend, 'containers': containers,
-                'coverage': {'file_search': 'parcial' if self.error_count or self.budget_exhausted else ('completado_en_rutas' if self.completed_roots else 'sin_rutas_revisadas'),
-                             'roots_requested': self.c.get('linux_roots', []), 'roots_completed': self.completed_roots,
+                'coverage': {'file_search': file_search, 'families': families,
+                             'roots_requested': [] if self.c.get('php_inventory_only', False) else self.c.get('linux_roots', []), 'roots_completed': self.completed_roots,
                              'roots_absent': self.missing_roots, 'excluded': self.c.get('linux_excludes', []),
                              'files_seen': self.files, 'archives_seen': self.archives, 'errors_count': self.error_count,
                              'errors': self.errors, 'budget_exhausted': self.budget_exhausted,

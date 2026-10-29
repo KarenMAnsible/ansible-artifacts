@@ -6,6 +6,17 @@
     $config = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{{ _vuln_config | to_json | b64encode }}')) | ConvertFrom-Json
     {{ lookup('ansible.builtin.file', playbook_dir ~ '/scripts/collect_windows.ps1') }}
     '@
+    function Write-Diagnostic([string]$Code, [string]$Stage, [int]$ExitCode=-1, [string]$ExceptionType='', [int]$Line=0) {
+        $result = @{status='no_evaluado'; platform='windows'; reason=('Fallo de recolección Windows: '+$Code); timestamp_utc=[DateTime]::UtcNow.ToString('o'); diagnostics=@{code=$Code; stage=$Stage; exit_code=$ExitCode; exception_type=$ExceptionType; line=$Line}}
+        [Console]::WriteLine('VIKO_VULN_JSON:'+($result | ConvertTo-Json -Depth 8 -Compress))
+    }
+    # Parse before launching: publish a line number, never source text or stderr.
+    $tokens=$null; $parseErrors=$null
+    [void][Management.Automation.Language.Parser]::ParseInput($scriptText,[ref]$tokens,[ref]$parseErrors)
+    if ($parseErrors.Count -gt 0) {
+        Write-Diagnostic 'powershell_parse_failed' 'script_parse' -1 '' ($parseErrors[0].Extent.StartLineNumber)
+        return
+    }
     $launcher = '[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); $s=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([Console]::In.ReadToEnd())); & ([scriptblock]::Create($s))'
     $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($launcher))
     $p = New-Object Diagnostics.Process
@@ -16,19 +27,30 @@
     $p.StartInfo.RedirectStandardInput = $true
     $p.StartInfo.StandardOutputEncoding = [Text.Encoding]::UTF8
     $p.StartInfo.CreateNoWindow = $true
+    $stage='process_start'
     try {
         [void]$p.Start()
         $read = $p.StandardOutput.ReadToEndAsync()
         $err = $p.StandardError.ReadToEndAsync()
         $p.StandardInput.WriteLine([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($scriptText)))
         $p.StandardInput.Close()
+        $stage='collector_execution'
         if (-not $p.WaitForExit({{ (((vuln_scan_seconds | default(vuln_defaults_scan_seconds)) | int) + 20) * 1000 }})) {
             $p.Kill()
-            [Console]::WriteLine('VIKO_VULN_JSON:{"status":"no_evaluado","reason":"Tiempo máximo del proceso Windows; reintentar con rutas más específicas"}')
+            [void]$p.WaitForExit(1000)
+            Write-Diagnostic 'collector_timeout' $stage
         } else {
-            [Console]::Write($read.GetAwaiter().GetResult())
-            [void]$err.GetAwaiter().GetResult()
+            $stdout=$read.GetAwaiter().GetResult()
+            $stderr=$err.GetAwaiter().GetResult()
+            if ($stdout -match '(?m)^VIKO_VULN_JSON:') {
+                [Console]::Write($stdout)
+            } else {
+                $code=if ($p.ExitCode -ne 0) {'collector_exit_nonzero'} elseif ($stderr.Length -gt 0) {'collector_error_without_json'} else {'collector_marker_missing'}
+                Write-Diagnostic $code $stage $p.ExitCode
+            }
         }
+    } catch {
+        Write-Diagnostic 'launcher_exception' $stage -1 ($_.Exception.GetType().Name)
     } finally { $p.Dispose() }
   args:
     no_profile: true
@@ -42,7 +64,11 @@
   ansible.builtin.set_fact:
     _vuln_raw:
       status: no_evaluado
-      reason: "{{ 'Sin conexión Windows o credencial válida' if _vuln_collector.unreachable | default(false) else 'El recolector Windows no devolvió evidencia válida' }}"
+      reason: "{{ 'Fallo de conexión WinRM o autenticación; revisar el evento de conexión' if _vuln_collector.unreachable | default(false) else 'El módulo Windows no devolvió evidencia; revisar etapa y código de salida' }}"
+      diagnostics:
+        stage: windows_module
+        code: "{{ 'connection_failed' if _vuln_collector.unreachable | default(false) else 'module_without_evidence' }}"
+        exit_code: "{{ _vuln_collector.rc | default(-1) | int }}"
 
 - name: Incorporar evidencia válida Windows
   ansible.builtin.set_fact:

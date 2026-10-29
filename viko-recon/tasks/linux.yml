@@ -1,8 +1,13 @@
 ---
 - name: Detectar Python 3 sin depender de gather_facts
   ansible.builtin.raw: |
-    p=$(command -v python3 2>/dev/null) || exit 3
-    "$p" -B -c 'import sys; print("VIKO_PY=" + sys.executable) if sys.version_info >= (3,6) else sys.exit(4)'
+    found=0
+    for candidate in python3 python3.14 python3.13 python3.12 python3.11 python3.10 python3.9 python3.8 python3.7 python3.6 /usr/libexec/platform-python /usr/bin/python3 /usr/local/bin/python3; do
+      p=$(command -v "$candidate" 2>/dev/null) || continue
+      found=1
+      "$p" -B -c 'import sys; print("VIKO_PY=" + sys.executable) if sys.version_info >= (3,6) else sys.exit(4)' 2>/dev/null && exit 0
+    done
+    if [ "$found" = 0 ]; then exit 3; else exit 4; fi
   register: _vuln_python
   become: "{{ (vuln_become | default(vuln_defaults_become)) | bool }}"
   changed_when: false
@@ -13,7 +18,18 @@
   ansible.builtin.set_fact:
     _vuln_raw:
       status: no_evaluado
-      reason: "{{ 'Sin conexión SSH o credencial válida' if _vuln_python.unreachable | default(false) else 'Se requiere Python 3.6 o superior; no se instaló ningún paquete' }}"
+      reason: >-
+        {{ 'Fallo de conexión SSH o autenticación; revisar el evento de conexión'
+           if _vuln_python.unreachable | default(false)
+           else ('No se encontró Python en los nombres y rutas consultados'
+           if _vuln_python.rc | default(-1) | int == 3
+           else ('Los intérpretes encontrados no superaron la prueba Python >= 3.6'
+           if _vuln_python.rc | default(-1) | int == 4
+           else 'Falló la comprobación inicial; no se atribuye automáticamente a falta de Python')) }}
+      diagnostics:
+        stage: linux_preflight
+        code: "{{ 'connection_failed' if _vuln_python.unreachable | default(false) else ('interpreter_not_found' if _vuln_python.rc | default(-1) | int == 3 else ('interpreter_probe_failed' if _vuln_python.rc | default(-1) | int == 4 else 'preflight_failed')) }}"
+        exit_code: "{{ _vuln_python.rc | default(-1) | int }}"
 
 - name: Recolectar evidencia Linux
   ansible.builtin.raw: |
@@ -29,6 +45,18 @@
   when:
     - not (_vuln_python.unreachable | default(false))
     - _vuln_python.stdout | default('') | regex_search('VIKO_PY=') is not none
+
+- name: Registrar fallo de ejecución Linux sin publicar salida cruda
+  ansible.builtin.set_fact:
+    _vuln_raw:
+      status: no_evaluado
+      reason: "{{ 'Fallo de conexión durante la recolección Linux' if _vuln_collector.unreachable | default(false) else 'Python fue localizado, pero el recolector no devolvió evidencia; revisar etapa y código de salida' }}"
+      diagnostics:
+        stage: linux_collector
+        code: "{{ 'connection_failed' if _vuln_collector.unreachable | default(false) else ('collector_exit_nonzero' if _vuln_collector.rc | default(-1) | int != 0 else 'collector_marker_missing') }}"
+        exit_code: "{{ _vuln_collector.rc | default(-1) | int }}"
+  when:
+    - not (_vuln_collector.skipped | default(false))
 
 - name: Incorporar evidencia válida Linux
   ansible.builtin.set_fact:

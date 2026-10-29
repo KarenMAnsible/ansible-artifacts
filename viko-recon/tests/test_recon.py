@@ -200,7 +200,7 @@ class ReportTests(unittest.TestCase):
         files = report.per_server_texts(r)
         self.assertEqual(len(files), 1)
         name = next(iter(files))
-        self.assertTrue(name.startswith('por_servidor/recon_SAPPRD_192.0.2.10_20261023_100000_123456_CDMX_'))
+        self.assertEqual(name, 'por_servidor/SAPPRD_192.0.2.10_20261023_100000.txt')
 
     def test_offline_text_dates_and_distinct_safe_filenames(self):
         r = report.build_report({'checks': ['php'], 'hosts': [
@@ -208,9 +208,11 @@ class ReportTests(unittest.TestCase):
             {'host': '..\\same', 'address': '192.0.2.10', 'raw': {'status': 'no_evaluado'}}]})
         files = report.per_server_texts(r)
         self.assertEqual(len(files), 2)
+        self.assertEqual(len({name.rsplit('/', 1)[-1] for name in files}), 1)
         for name, content in files.items():
             self.assertNotIn('..', name)
-            self.assertEqual(name.count('/'), 1)
+            self.assertIn(name.count('/'), (1, 2))
+            self.assertRegex(name.rsplit('/', 1)[-1], r'^same_192\.0\.2\.10_\d{8}_\d{6}\.txt$')
             text = content.decode('utf-8-sig')
             self.assertIn('IP(s) del servidor: 192.0.2.10', text)
             self.assertIn('Fecha y hora de recolección (CDMX): no registrada', text)

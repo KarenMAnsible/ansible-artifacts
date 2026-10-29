@@ -119,6 +119,14 @@ def classify(observation, rule, evidence):
     return 'fuera_rango_version', 'Fuera del rango de este CVE; no significa ausencia de otras vulnerabilidades.'
 
 
+def family_coverage(coverage, family):
+    return coverage.get('families', {}).get(family, {}).get('status', coverage.get('file_search', 'no_evaluado'))
+
+
+def incomplete_coverage(coverage, checks):
+    return any(family_coverage(coverage, family) not in ('completado_en_rutas', 'completado_en_fuentes') for family in checks)
+
+
 def build_report(payload):
     checks = payload.get('checks', ['php', 'log4j', 'struts'])
     rules = [r for r in RULESET['rules'] if r['family'] in checks]
@@ -136,6 +144,7 @@ def build_report(payload):
         hs.update(platform=raw.get('platform', ''), system=raw.get('system', {}),
                   collection_status=raw.get('status', 'no_evaluado'),
                   collection_reason=raw.get('reason', ''), coverage=coverage,
+                  diagnostics=raw.get('diagnostics', {}), collector_version=raw.get('collector_version', 'anterior / no registrada'),
                   trend_local=raw.get('trend_local', {}), services=raw.get('services', []),
                   processes=raw.get('processes', []), containers=raw.get('containers', []),
                   family_status={}, timestamp_utc=raw.get('timestamp_utc', ''))
@@ -146,8 +155,12 @@ def build_report(payload):
             candidates = [o for o in obs if o.get('component') == rule['component']] if available else []
             if not candidates:
                 state = 'no_evaluado' if not available else 'no_detectado_en_rutas_revisadas'
-                if available and coverage.get('file_search') != 'completado_en_rutas':
-                    state = 'no_detectado_busqueda_parcial'
+                if available:
+                    scope = family_coverage(coverage, rule['family'])
+                    if scope == 'completado_en_fuentes':
+                        state = 'no_detectado_en_fuentes_consultadas'
+                    elif scope != 'completado_en_rutas':
+                        state = 'no_detectado_busqueda_parcial'
                 candidates = [{'component': rule['component'], 'path': '', 'version': '', 'version_source': ''}]
             else:
                 state = None
@@ -183,11 +196,12 @@ def build_report(payload):
             states = [f['status'] for f in own if f['family'] == family and f.get('cve')]
             priority = ['potencialmente_afectado', 'requiere_validacion_proveedor', 'requiere_validacion',
                         'requiere_validar_migracion_upload', 'no_evaluado', 'no_detectado_busqueda_parcial',
-                        'no_detectado_en_rutas_revisadas', 'fuera_rango_version', 'corregido_segun_evidencia_proveedor']
+                        'no_detectado_en_rutas_revisadas', 'no_detectado_en_fuentes_consultadas', 'fuera_rango_version', 'corregido_segun_evidencia_proveedor']
             hs['family_status'][family] = next((s for s in priority if s in states), 'no_evaluado')
         hs['observations_count'] = len(obs)
         hs['review_required'] = (any(f['status'].startswith(('potencialmente', 'requiere_', 'no_evaluado')) for f in own)
-                                 or coverage.get('file_search') != 'completado_en_rutas'
+                                 or incomplete_coverage(coverage, host_checks)
+                                 or any(c.get('runtime_web') == 'pendiente_de_correlacion' for c in coverage.get('families', {}).values())
                                  or any(c.get('running') or c.get('status') == 'no_evaluado' for c in hs['containers']))
         hosts.append(hs)
     counts = dict(collections.Counter(f['status'] for f in findings if f.get('cve')))
@@ -195,7 +209,7 @@ def build_report(payload):
             'rules_reviewed_on': RULESET['reviewed_on'], 'checks': checks,
             'scope_note': RULESET['scope_note'], 'summary': {'hosts': len(hosts),
                 'hosts_not_evaluated': sum(h['collection_status'] != 'recolectado' for h in hosts),
-                'hosts_partial': sum(h['collection_status'] == 'recolectado' and h['coverage'].get('file_search') != 'completado_en_rutas' for h in hosts),
+                'hosts_partial': sum(h['collection_status'] == 'recolectado' and incomplete_coverage(h['coverage'], h['coverage'].get('limits', {}).get('checks', checks)) for h in hosts),
                 'hosts_requiring_review': sum(h['review_required'] for h in hosts),
                 'cve_observation_rows': sum(bool(f.get('cve')) for f in findings), 'statuses': counts},
             'hosts': hosts, 'findings': findings}
@@ -280,6 +294,7 @@ def render_text(report):
             'Fecha y hora de recolección (CDMX): ' + mexico_datetime(host['timestamp_utc']),
             'Fecha de recolección (UTC): ' + clean(host['timestamp_utc'] or 'no registrada; equipo no evaluado'),
             'Estado de recolección: ' + clean(host['collection_status']),
+            'Versión del recolector: ' + clean(host.get('collector_version', 'anterior / no registrada')),
             'Cobertura del recorrido: ' + clean(coverage.get('file_search', 'no_evaluado')),
             'Tiempo de recolección (s): ' + clean(coverage.get('elapsed_seconds', 'sin dato')),
             'Presupuesto agotado: ' + ('sí' if coverage.get('budget_exhausted') else 'no / sin dato'),
@@ -288,6 +303,19 @@ def render_text(report):
         ]
         if host['collection_reason']:
             lines.append('Motivo de recolección pendiente: ' + clean(host['collection_reason']))
+        diagnostic = host.get('diagnostics', {})
+        if diagnostic:
+            lines.append('Diagnóstico técnico (sin salida cruda):')
+            for key in ('stage', 'code', 'exit_code', 'exception_type', 'line'):
+                if key in diagnostic:
+                    lines.append('  ' + key + ': ' + clean(diagnostic[key]))
+        for family, info in coverage.get('families', {}).items():
+            lines.append('Cobertura ' + clean(family) + ': ' + clean(info.get('status', 'no_evaluado')))
+            lines.append('  Fuentes: ' + clean(', '.join(info.get('sources', []))))
+            if info.get('runtime_web'):
+                lines.append('  PHP utilizado por la aplicación web: ' + clean(info['runtime_web']))
+            if info.get('note'):
+                lines.append('  Alcance: ' + clean(info['note']))
         for label, key in [('Raíces solicitadas', 'roots_requested'), ('Raíces recorridas', 'roots_completed'),
                            ('Raíces ausentes', 'roots_absent'), ('Exclusiones', 'excluded')]:
             lines.append(label + ':')
@@ -296,6 +324,14 @@ def render_text(report):
                 lines.append('  Sin dato / ninguna registrada.')
         lines.append('Estado por familia:')
         lines.extend('  ' + clean(k) + ': ' + clean(v) for k, v in host['family_status'].items())
+        lines.append('Servicios relacionados (estado observado; no confirma uso de una biblioteca):')
+        lines.extend('  ' + clean(s.get('name', '')) + ' | ' + clean(s.get('state', '')) + ' | ' + clean(s.get('substate', '')) for s in host['services'])
+        if not host['services']:
+            lines.append('  Ninguno registrado; no acredita ausencia.')
+        lines.append('Procesos relacionados (nombre, PID y ejecutable; sin argumentos):')
+        lines.extend('  ' + clean(p.get('name', '')) + ' | PID ' + clean(p.get('pid', '')) + ' | ' + clean(p.get('executable', 'no disponible')) for p in host['processes'])
+        if not host['processes']:
+            lines.append('  Ninguno registrado; no acredita ausencia.')
         lines.append('Detalle de resultados:')
         for finding in report['findings']:
             if finding['host'] != host['host']:
@@ -356,7 +392,7 @@ def per_server_texts(report):
         single['summary'] = {
             'hosts': 1,
             'hosts_not_evaluated': int(host['collection_status'] != 'recolectado'),
-            'hosts_partial': int(host['collection_status'] == 'recolectado' and host['coverage'].get('file_search') != 'completado_en_rutas'),
+            'hosts_partial': int(host['collection_status'] == 'recolectado' and incomplete_coverage(host['coverage'], host['coverage'].get('limits', {}).get('checks', report['checks']))),
             'hosts_requiring_review': int(host['review_required']),
             'cve_observation_rows': sum(bool(f.get('cve')) for f in findings),
             'statuses': dict(collections.Counter(f['status'] for f in findings if f.get('cve')))

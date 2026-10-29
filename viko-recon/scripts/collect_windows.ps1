@@ -205,9 +205,12 @@ function Invoke-Bounded([string]$Exe,[string]$Arguments) {
         return $text
     } catch {Add-Problem $Exe 'error_consulta'; return $null} finally {$p.Dispose()}
 }
+$script:Stage='runtime_initialization'
+$services=@(); $processes=@(); $containers=@(); $localAddresses=@(); $os=$null
 try {
     if ($PSVersionTable.PSVersion -lt [Version]'5.1') {throw 'PowerShell 5.1 required'}
     Add-Type -AssemblyName System.IO.Compression
+    $script:Stage='system_inventory'
     $os=Get-CimInstance Win32_OperatingSystem -OperationTimeoutSec 15
     $localAddresses=@()
     try {
@@ -221,12 +224,17 @@ try {
             }
         }
     } catch {Add-Problem 'direcciones_locales' 'consulta_no_disponible'}
+    $script:Stage='service_inventory'
     $services=@()
     try {
         $services=@(Get-CimInstance Win32_Service -OperationTimeoutSec 15 | Where-Object {$_.Name -match 'php|apache|httpd|nginx|tomcat|instana|ds_agent|trend|cloudreset|W3SVC'} | ForEach-Object {@{name=$_.Name; state=$_.State}})
     } catch {Add-Problem 'servicios' 'consulta_no_disponible'}
     $processes=@()
-    try {$processes=@(Get-Process | Where-Object {$_.ProcessName -match 'php|apache|httpd|nginx|tomcat|java|instana|ds_agent|trend|cloudreset'} | ForEach-Object {@{name=$_.ProcessName; pid=$_.Id}})} catch {Add-Problem 'procesos' 'consulta_no_disponible'}
+    try {$processes=@(Get-Process | Where-Object {$_.ProcessName -match 'php|apache|httpd|nginx|tomcat|java|instana|ds_agent|trend|cloudreset'} | ForEach-Object {
+        $exe=''; try {$exe=$_.Path} catch {}
+        @{name=$_.ProcessName; pid=$_.Id; executable=$exe}
+    })} catch {Add-Problem 'procesos' 'consulta_no_disponible'}
+    $script:Stage='php_inventory'
     if ('php' -in @($config.checks)) {
         $php=Get-Command php.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($php) {
@@ -250,19 +258,51 @@ try {
             }
         }
     }
+    if ($config.php_inventory_only) {
+        # Explicit finite scope; additional application drives require later roots.
+        $roots=@('C:\PHP','C:\Program Files\PHP','C:\Program Files (x86)\PHP',
+                 'C:\xampp\php','C:\wamp\bin\php','C:\wamp64\bin\php')
+        if ($php) {$roots+=Split-Path -Parent $php.Source}
+        foreach ($proc in $processes) {
+            if ($proc.name -match '^php' -and $proc.executable) {$roots+=Split-Path -Parent $proc.executable}
+        }
+        $config.windows_roots=@($roots | Select-Object -Unique)
+    }
+    $script:Stage='file_search'
     Walk-Roots
+    $searchState=if ($script:ErrorCount -gt 0 -or $script:BudgetExhausted) {'parcial'} elseif ($script:Completed.Count -eq 0) {'sin_rutas_revisadas'} else {'completado_en_rutas'}
+    $families=@{}
+    foreach ($family in @($config.checks)) {
+        $families[$family]=@{status=$searchState; sources=@('archivos en raíces configuradas')}
+        if ($family -eq 'php') {
+            $families[$family].sources=@('PHP CLI en PATH','metadatos de ejecutables en raíces configuradas')
+            $families[$family].runtime_web='pendiente_de_correlacion'
+            if ($config.php_inventory_only -and $script:ErrorCount -eq 0 -and -not $script:BudgetExhausted) {$families[$family].status='completado_en_fuentes'}
+            $families[$family].note='No acredita ausencia de PHP fuera de las fuentes consultadas ni en contenedores.'
+        }
+    }
+    $script:Stage='result_serialization'
     $result=@{
-        schema_version=1; status='recolectado'; platform='windows'; timestamp_utc=[DateTime]::UtcNow.ToString('o')
+        schema_version=1; collector_version='1.5-piloto'; status='recolectado'; platform='windows'; timestamp_utc=[DateTime]::UtcNow.ToString('o')
         system=@{hostname=[Environment]::MachineName; ip_addresses=$localAddresses; PRETTY_NAME=$os.Caption; VERSION_ID=$os.Version; build=$os.BuildNumber; architecture=$os.OSArchitecture}
         observations=@($script:Observations.ToArray()); services=$services; processes=$processes; containers=$containers
         trend_local=@{services=@($services | Where-Object {$_.name -match 'ds_agent|trend'}); note='Evidencia local; estado de protección y cobertura requieren consola de Seguridad.'}
         coverage=@{
-            file_search=$(if ($script:ErrorCount -gt 0 -or $script:BudgetExhausted) {'parcial'} elseif ($script:Completed.Count -eq 0) {'sin_rutas_revisadas'} else {'completado_en_rutas'})
+            file_search=$searchState; families=$families
             roots_requested=@($config.windows_roots); roots_completed=@($script:Completed.ToArray()); roots_absent=@($script:Absent.ToArray()); excluded=@($config.windows_excludes)
             files_seen=$script:FileCount; archives_seen=$script:ArchiveCount; errors_count=$script:ErrorCount; errors=@($script:Errors.ToArray()); budget_exhausted=$script:BudgetExhausted
             elapsed_seconds=[Math]::Round(([DateTime]::UtcNow-$script:Started).TotalSeconds,2); limits=$config
             limitations=@('Solo rutas configuradas; no prueba ausencia global.','Contenedores: solo inventario; imágenes y contenido interno no inspeccionados.','No correlaciona automáticamente bibliotecas con aplicaciones ni exposición pública.','No evalúa condiciones de explotación ni configuraciones de Struts/PHP.','Los volúmenes adicionales requieren raíces explícitas; no se siguen junctions ni reparse points.')
         }
     }
-} catch {$result=@{status='no_evaluado'; reason=('Fallo interno del recolector Windows: '+$_.Exception.GetType().Name)}}
+} catch {
+    $result=@{status='no_evaluado'; platform='windows'; reason=('Fallo interno del recolector Windows en '+$script:Stage); timestamp_utc=[DateTime]::UtcNow.ToString('o'); diagnostics=@{code='collector_exception'; stage=$script:Stage; exception_type=$_.Exception.GetType().Name; line=$_.InvocationInfo.ScriptLineNumber}}
+    if ($script:Observations.Count -gt 0) {
+        $result.status='recolectado'
+        $result.observations=@($script:Observations.ToArray())
+        $result.system=@{hostname=[Environment]::MachineName; ip_addresses=$localAddresses}
+        $result.services=$services; $result.processes=$processes; $result.containers=$containers
+        $result.coverage=@{file_search='parcial'; limits=$config; errors_count=($script:ErrorCount+1); errors=@($script:Errors.ToArray())+@(@{location=$script:Stage; reason='collector_exception'}); roots_requested=@($config.windows_roots); roots_completed=@($script:Completed.ToArray()); roots_absent=@($script:Absent.ToArray()); budget_exhausted=$script:BudgetExhausted}
+    }
+}
 [Console]::WriteLine('VIKO_VULN_JSON:'+($result | ConvertTo-Json -Depth 30 -Compress))
