@@ -391,6 +391,23 @@ def render_html(report):
             + '</tbody></table></div><h2>Cobertura por servidor</h2>' + ''.join(cover) + '</html>').encode('utf-8')
 
 
+def php_visible_status(host):
+    """Presentation only: no new verdicts or changes to the underlying findings."""
+    if host.get('collection_status') != 'recolectado':
+        return 'PENDIENTE / NO EVALUADO'
+    result = host.get('php_result', '')
+    coverage = host.get('coverage_php') or family_coverage(host.get('coverage', {}), 'php')
+    if result == 'afectacion_potencial':
+        return 'POTENCIALMENTE VULNERABLE'
+    if coverage not in ('completado_en_fuentes', 'completado_en_rutas'):
+        return 'PENDIENTE / NO EVALUADO'
+    if result == 'correccion_verificada':
+        return 'NO VULNERABLE PARA LOS CVE VERIFICADOS (CORRECCIÓN VERIFICADA)'
+    if result == 'sin_hallazgo_en_alcance_consultado':
+        return 'NO VULNERABLE EN EL ALCANCE CONSULTADO (SIN HALLAZGOS)'
+    return 'PENDIENTE / NO EVALUADO'
+
+
 def render_text(report):
     """Human-readable evidence, including negative/partial/failed checks."""
     def clean(value):
@@ -411,6 +428,14 @@ def render_text(report):
         'Servidores que requieren revisión: ' + str(summary['hosts_requiring_review']),
         'Filas de evaluación por componente/CVE: ' + str(summary['cve_observation_rows']),
     ]
+    if len(report['hosts']) == 1 and 'php' in report['checks']:
+        first = report['hosts'][0]
+        lines[1:1] = [
+            'SERVIDOR: ' + clean(first['system'].get('hostname') or first['host']),
+            'ESTADO PHP: ' + php_visible_status(first),
+            'Alcance: PHP y los CVE solicitados. No acredita ausencia global de vulnerabilidades.',
+            '',
+        ]
     for status, count in sorted(summary['statuses'].items()):
         lines.append('  ' + status + ': ' + str(count))
     lines += [
@@ -425,6 +450,7 @@ def render_text(report):
         coverage = host['coverage']
         lines += [
             '', 'SERVIDOR: ' + clean(host['system'].get('hostname') or host['host']),
+            'Estado PHP: ' + php_visible_status(host) if 'php' in report['checks'] else 'Estado: ver resultados por familia',
             'Nombre en inventario: ' + clean(host['host']),
             'Cliente: ' + clean(host['customer']),
             'IP(s) del servidor: ' + clean(', '.join(server_ips(host)) or 'no registrada'),
