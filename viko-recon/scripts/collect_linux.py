@@ -308,7 +308,8 @@ class Collector:
                 # Anchor after the epoch. A metapackage such as
                 # 2:101~+ubuntu24.04.1 must never become PHP 24.04.1.
                 m = re.match(r'(\d+\.\d+\.\d+)(?=$|[-+~.])', re.sub(r'^\d+:', '', version))
-                self.add('php', 'package:' + name, m.group(1) if m else '', 'package_db', package=name, package_version=version, architecture=arch, package_manager=manager)
+                self.add('php', 'package:' + name, m.group(1) if m else '', 'package_db', package=name, package_version=version, architecture=arch, package_manager=manager,
+                         package_role='runtime' if re.search(r'(?:-(?:cli|fpm|cgi|fastcgi)$|^(?:libapache2-mod-php|apache2-mod_php))', name) else 'supporting_package')
 
     def php(self):
         start_errors = self.error_count
@@ -346,13 +347,44 @@ class Collector:
             'runtime_web': 'pendiente_de_correlacion',
             'note': 'El inventario de paquetes/CLI no acredita ausencia de PHP en aplicaciones, módulos Apache o contenedores.'}
 
+    @staticmethod
+    def runtime_process_scope(pid):
+        """Distinguish a host service mount sandbox from a container/chroot.
+        Only proc metadata is read before acceptance; no namespace entry occurs.
+        """
+        proof = {'pid': pid, 'accepted': False, 'reason': 'scope_no_verificado'}
+        try:
+            same = {}
+            for kind in ('mnt', 'pid', 'user', 'net'):
+                same[kind] = os.readlink('/proc/{}/ns/{}'.format(pid, kind)) == os.readlink('/proc/self/ns/' + kind)
+            root = os.stat('/proc/{}/root'.format(pid)); own = os.stat('/')
+            same_root = (root.st_dev, root.st_ino) == (own.st_dev, own.st_ino)
+            proof.update(namespace_matches=same, same_root=same_root)
+            if not same_root:
+                proof['reason'] = 'root_distinto_no_inspeccionado'; return proof
+            if not same['pid'] or not same['user']:
+                proof['reason'] = 'pid_o_user_namespace_distinto_no_inspeccionado'; return proof
+            if same['mnt']:
+                proof.update(accepted=True, reason='mismo_namespace_y_root'); return proof
+            with open('/proc/{}/cgroup'.format(pid)) as stream:
+                cgroup = stream.read(65537)
+            if len(cgroup) > 65536 or re.search(r'docker|kubepods|libpod|containerd|lxc|machine.slice', cgroup, re.I):
+                proof['reason'] = 'cgroup_contenedor_o_no_admitido'; return proof
+            units = re.findall(r'/(?:system\.slice)/((?:apache2|httpd|php[-A-Za-z0-9._]*fpm[-A-Za-z0-9._]*)\.service)(?:/|$)', cgroup, re.M)
+            if units:
+                proof.update(accepted=True, reason='servicio_host_montaje_aislado_root_pid_user_coinciden', service_units=sorted(set(units)))
+            else: proof['reason'] = 'namespace_montaje_distinto_sin_servicio_host_verificado'
+        except OSError:
+            proof['reason'] = 'metadatos_scope_no_legibles'
+        return proof
+
     def php_runtime(self, services, processes):
         """Disk configuration + observed processes. No requests, dumps or env."""
         import gzip
         import hashlib
         import socket
         self.php_web = {'status': 'correlacion_parcial', 'config': [], 'loaded_modules': [],
-                        'workers': [], 'errors': [], 'files_consulted': [],
+                        'workers': [], 'errors': [], 'files_consulted': [], 'process_scope': [],
                         'limitations': ['Configuración en disco; no demuestra qué generación cargó cada worker.',
                                          'Sin solicitudes HTTP, contenedores, chroots ni configuraciones externas no descubiertas.',
                                          'No se prueba que una aplicación atendió peticiones ni exposición pública.']}
@@ -448,12 +480,10 @@ class Collector:
             name = proc.get('name', '')
             if not re.search(r'php|apache|httpd', name, re.I): continue
             pid = proc['pid']
-            try:
-                if os.readlink('/proc/{}/ns/mnt'.format(pid)) != os.readlink('/proc/self/ns/mnt'):
-                    issue('/proc/{}/ns/mnt'.format(pid), 'namespace_distinto_contenido_no_inspeccionado')
-                    continue
-            except OSError:
-                issue('/proc/{}/ns/mnt'.format(pid), 'namespace_no_verificado')
+            scope = self.runtime_process_scope(pid)
+            web['process_scope'].append(scope)
+            if not scope['accepted']:
+                issue('/proc/{}/scope'.format(pid), scope['reason'])
                 continue
             exe = proc.get('executable', '')
             if re.search(r'apache|httpd', name, re.I):
@@ -464,23 +494,35 @@ class Collector:
                         processed.add((pid, m.group(1)))
                         web['loaded_modules'].append({'pid': pid, 'path': m.group(1), 'deleted': bool(m.group(2)),
                                                       'state': 'mod_php_mapeado_en_proceso'})
+                        fields = line.split(None, 5)
+                        same_file = False
+                        try:
+                            st = os.stat(m.group(1)); major, minor = fields[3].split(':')
+                            same_file = st.st_ino == int(fields[4]) and os.major(st.st_dev) == int(major, 16) and os.minor(st.st_dev) == int(minor, 16)
+                        except (OSError, ValueError, IndexError): pass
                         self.add('php', m.group(1), '', 'loaded_module', runtime_state='mod_php_mapeado', pid=pid,
+                                 namespace_scope=scope['reason'], host_file_identity_verified=same_file and not bool(m.group(2)),
                                  loaded_generation='pendiente' if m.group(2) else 'no_verificada')
             if re.search(r'php', name, re.I):
                 if not exe:
                     issue('/proc/{}/exe'.format(pid), 'no_legible'); continue
                 deleted = exe.endswith(' (deleted)')
                 path = exe[:-10] if deleted else exe
-                web['workers'].append({'pid': pid, 'path': path, 'deleted': deleted, 'state': 'proceso_php_observado'})
+                web['workers'].append({'pid': pid, 'path': path, 'deleted': deleted, 'state': 'proceso_php_observado', 'network_namespace_match': scope['namespace_matches']['net'], 'namespace_scope': scope['reason']})
                 if path not in processed:
                     processed.add(path)
+                    same_file = False
+                    try:
+                        observed = os.stat('/proc/{}/exe'.format(pid)); disk = os.stat(path)
+                        same_file = (observed.st_dev, observed.st_ino) == (disk.st_dev, disk.st_ino)
+                    except OSError: pass
                     version = ''
-                    if not deleted and self.c.get('run_php_version', True) and re.match(r'^php(?:[0-9.]*|[-]?fpm[0-9.]*|[-]?cgi[0-9.]*)$', os.path.basename(path)):
+                    if same_file and not deleted and self.c.get('run_php_version', True) and re.match(r'^php(?:[0-9.]*|[-]?fpm[0-9.]*|[-]?cgi[0-9.]*)$', os.path.basename(path)):
                         text = self.command([path, '-n', '-v'])
                         m = re.search(r'^PHP\s+(\S+)', text or '', re.M)
                         version = m.group(1) if m else ''
                     self.add('php', path, version, 'observed_executable', runtime_state='proceso_php_observado',
-                             pid=pid, loaded_generation='pendiente' if deleted else 'no_verificada')
+                             pid=pid, host_file_identity_verified=same_file and not deleted, loaded_generation='pendiente' if deleted else 'no_verificada')
         # Unix listener ownership: proof that a PHP process holds the configured socket.
         unix = read('/proc/net/unix', 1048576)
         socket_paths = {}
@@ -503,6 +545,9 @@ class Collector:
                 except (ValueError, OSError): continue
         listeners = {}
         for worker in web['workers']:
+            if not worker.get('network_namespace_match'):
+                issue('/proc/{}/ns/net'.format(worker['pid']), 'socket_namespace_red_distinto_no_correlacionado')
+                continue
             fdpath = '/proc/{}/fd'.format(worker['pid'])
             try:
                 for fd in os.listdir(fdpath)[:4096]:
@@ -538,6 +583,7 @@ class Collector:
             if o.get('component') != 'php' or o.get('path', '').startswith('package:'): continue
             p = o.get('path', '')
             if not p.startswith('/'): continue
+            if o.get('host_file_identity_verified') is False: continue
             if shutil.which('dpkg-query'):
                 own = self.command(['dpkg-query', '-S', p])
                 for line in (own or '').splitlines():
@@ -701,7 +747,7 @@ class Collector:
                 if self.budget_exhausted: families[family]['status'] = 'parcial'
             else:
                 families[family] = {'status': file_search, 'sources': ['archivos en raíces configuradas']}
-        return {'schema_version': 1, 'collector_version': '1.6.1-evidencia', 'status': 'recolectado', 'platform': 'linux', 'system': system,
+        return {'schema_version': 1, 'collector_version': '1.6.2-evidencia', 'status': 'recolectado', 'platform': 'linux', 'system': system,
                 'timestamp_utc': datetime.datetime.now(datetime.timezone.utc).isoformat(),
                 'observations': self.observations, 'services': services, 'processes': processes,
                 'trend_local': trend, 'containers': containers, 'php_web': getattr(self, 'php_web', {}),

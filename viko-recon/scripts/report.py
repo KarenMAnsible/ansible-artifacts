@@ -196,7 +196,7 @@ def build_report(payload):
         for rule in rules:
             if rule['family'] not in host_checks:
                 continue
-            candidates = [o for o in obs if o.get('component') == rule['component']] if available else []
+            candidates = [o for o in obs if o.get('component') == rule['component'] and o.get('package_role') != 'supporting_package'] if available else []
             if not candidates:
                 state = 'no_evaluado' if not available else 'no_detectado_en_rutas_revisadas'
                 if available:
@@ -227,6 +227,15 @@ def build_report(payload):
                 finding['id'] = hashlib.sha256(identity.encode()).hexdigest()[:20]
                 findings.append(finding)
         for o in obs:
+            if o.get('component') == 'php' and o.get('package_role') == 'supporting_package':
+                f = {k: hs[k] for k in ('host', 'address', 'customer', 'security_coverage')}
+                f.update(family='php', cve='', severity='informational', component='php',
+                         version=o.get('version', ''), path=o.get('path', ''), version_source=o.get('version_source', ''),
+                         package=o.get('package', ''), package_version=o.get('package_version', ''),
+                         status='componente_informativo', note='Paquete de soporte o metapaquete; no se cuenta como runtime PHP ni se le atribuyen CVE de core directamente.',
+                         action='Conservar relación con los paquetes y ejecutables PHP reales.', source='', runtime_exposure='no_evaluada')
+                findings.append(f)
+                continue
             if o.get('component') not in ('log4j-api', 'log4j1', 'xwork-core'):
                 continue
             family = 'struts' if o['component'] == 'xwork-core' else 'log4j'
@@ -281,7 +290,7 @@ def php_result(finding, coverage=None):
 
 def enrich_php(report):
     for host in report['hosts']:
-        own = [f for f in report['findings'] if f['host'] == host['host'] and f['family'] == 'php']
+        own = [f for f in report['findings'] if f['host'] == host['host'] and f['family'] == 'php' and f.get('cve')]
         web = host.get('php_web', {})
         for finding in own:
             finding['runtime_observed'] = finding.get('runtime_state', 'uso_no_confirmado')
