@@ -80,6 +80,41 @@ class Planner:
             return next(iter(values))
         raise RuntimeError('Gestor no implementado: ' + manager)
 
+    def source_evidence(self, name, candidate):
+        text = self.run(['apt-cache', 'show', name + '=' + candidate])
+        stanzas = []
+        for block in text.split('\n\n'):
+            fields = {}
+            for line in block.splitlines():
+                if ': ' in line and not line.startswith(' '):
+                    k, v = line.split(': ', 1)
+                    fields[k] = v
+            if fields.get('Package') == name and fields.get('Version') == candidate:
+                source = fields.get('Source', name)
+                match = re.fullmatch(r'([a-z0-9+.-]+)(?: \(([^)]+)\))?', source)
+                if match:
+                    stanzas.append((match.group(1), match.group(2) or candidate))
+        identities = set(stanzas)
+        if len(identities) != 1:
+            raise RuntimeError('Fuente exacta del candidato no determinada: ' + name)
+        source, source_version = next(iter(identities))
+        matches = [r for r in self.c.get('vendor_sources', [])
+                   if r.get('source_package') == source and r.get('source_version') == source_version
+                   and r.get('packaging_hash_verified') is True]
+        if len(matches) != 1:
+            raise RuntimeError('Candidato sin evidencia fuente exacta revisada: ' + name)
+        record = matches[0]
+        patches = record.get('patches_listed_in_series', [])
+        cves = {c for patch in patches for c in patch.get('cves', [])
+                if re.fullmatch(r'[a-f0-9]{64}', patch.get('patch_text_sha256', ''))}
+        if not set(CVES).issubset(cves):
+            raise RuntimeError('La evidencia fuente no identifica ambos CVE: ' + name)
+        return {'package': name, 'source_package': source, 'source_version': source_version,
+                'packaging_sha256': record.get('packaging_sha256', ''),
+                'minimal_eol_backport': any(p.get('minimal_eol_backport') for p in patches),
+                'signature_verified': record.get('signature_verified', False),
+                'scope': 'Fuente revisada; no prueba binario en memoria ni cobertura integral'}
+
     def build(self):
         packages = {p['key']: p['value'] for p in self.c.get('packages', [])}
         if not packages:
@@ -117,10 +152,11 @@ class Planner:
                 continue
             branch = '.'.join(map(str, current[:2]))
             minimum = MINIMUM.get(branch)
-            if minimum is None:
-                self.blockers.append(path + ': rama ' + branch + ' requiere migracion o evidencia de backport del proveedor')
+            legacy = minimum is None
+            if legacy and (self.c['manager'] != 'apt' or branch not in ('7.4', '8.1')):
+                self.blockers.append(path + ': rama ' + branch + ' requiere plan de migracion o evidencia especifica del proveedor')
                 continue
-            if current >= version(minimum):
+            if not legacy and current >= version(minimum):
                 self.checked.append({'path': path, 'version': binary['version'], 'status': 'version_en_minimo_o_superior_runtime_web_pendiente'})
                 continue
             try:
@@ -145,17 +181,37 @@ class Planner:
                 if owner not in selected or len(selected) > 40:
                     raise RuntimeError('No se pudo delimitar el grupo de paquetes del runtime')
                 exact = []
+                revision_change = False
+                source_evidence = []
                 candidate_versions = set()
                 for name in selected:
                     candidate = self.candidate(name)
                     target = version(candidate)
-                    if target is None or target[:2] != current[:2] or target < version(minimum):
+                    if target is None or target[:2] != current[:2] or (not legacy and target < version(minimum)):
                         raise RuntimeError('El candidato no contiene el minimo upstream en la misma rama: ' + name)
+                    installed_exact = entries[0]['version']
+                    if self.c['manager'] == 'apt':
+                        # dpkg ordering includes epoch, distribution rebuild and backport revision.
+                        self.run(['dpkg', '--compare-versions', candidate, 'ge', installed_exact])
+                    revision_change = revision_change or candidate != installed_exact
+                    if legacy:
+                        source_evidence.append(self.source_evidence(name, candidate))
                     candidate_versions.add(target)
                     exact.append({'name': name, 'version': candidate})
                 if len(candidate_versions) != 1:
                     raise RuntimeError('Candidatos PHP desalineados entre extensiones/runtime')
                 target = '.'.join(map(str, candidate_versions.pop()))
+                if legacy:
+                    minimal = any(e.get('minimal_eol_backport', False) for e in source_evidence)
+                    self.checked.append({'path': path, 'version': observed,
+                        'status': 'backport_minimo_cierre_pendiente' if minimal else 'rama_heredada_cierre_pendiente',
+                        'packages': exact, 'source_evidence': source_evidence,
+                        'update_available': revision_change})
+                    self.blockers.append(path + ': ' + (
+                        'backport minimo EOL identificado; la actualizacion de la misma rama no acredita parche integral. Requiere migracion compatible a rama con correccion completa y prueba web.'
+                        if minimal else 'rama heredada: revisar cobertura del proveedor y runtime web antes de cerrar CVE.'))
+                    if not revision_change:
+                        continue
                 services = []
                 for name, service in self.c.get('services', {}).items():
                     if service.get('state') != 'running':
@@ -176,7 +232,10 @@ class Planner:
                     'health_argv': [path, '-n', '-r', 'echo "VIKO_PHP_RUNTIME_OK";'],
                     'health_regex': '^VIKO_PHP_RUNTIME_OK$',
                     'validation_scope': 'PHP CLI y servicios identificados; falta prueba funcional de la aplicacion y posibles instalaciones paralelas',
-                    'auto_generated': True})
+                    'auto_generated': True,
+                    'package_revision_change': revision_change,
+                    'remediation_basis': 'actualizacion_misma_rama_cierre_pendiente' if legacy else 'minimo_upstream',
+                    'source_evidence': source_evidence})
             except (RuntimeError, OSError, subprocess.TimeoutExpired, ET.ParseError) as error:
                 self.blockers.append(path + ': ' + str(error))
         return self.result()

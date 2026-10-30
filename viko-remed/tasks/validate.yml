@@ -14,8 +14,6 @@
       - (remed_item.method == 'windows_msi') == (_remed_windows | bool)
       - remed_item.expected_output | default('') | length > 0
       - remed_item.expected_output is match('^[0-9]+[.][0-9]+[.][0-9]+$')
-      - (remed_item.expected_output.split('.')[:2] | join('.')) in ['8.2', '8.3', '8.4', '8.5']
-      - remed_item.expected_output is version({'8.2':'8.2.35','8.3':'8.3.36','8.4':'8.4.27','8.5':'8.5.12'}[remed_item.expected_output.split('.')[:2] | join('.')], '>=')
       - remed_item.health_regex | default('') | length > 0
       - remed_item.services | default([]) is sequence
       - remed_item.services | default([]) is not string
@@ -56,3 +54,16 @@
       - remed_item.probe_script | default('') | length > 0
       - remed_item.health_script | default('') | length > 0
   when: _remed_windows
+
+- name: Validar mínimo upstream o actualización limitada de rama heredada
+  ansible.builtin.assert:
+    that:
+      - >-
+        ((remed_item.expected_output.split('.')[:2] | join('.')) in ['8.2','8.3','8.4','8.5']
+        and remed_item.expected_output is version({'8.2':'8.2.35','8.3':'8.3.36','8.4':'8.4.27','8.5':'8.5.12'}.get(remed_item.expected_output.split('.')[:2] | join('.'), '999.0.0'), '>='))
+        or (not _remed_windows and ansible_facts.pkg_mgr == 'apt'
+        and remed_item.remediation_basis | default('') == 'actualizacion_misma_rama_cierre_pendiente'
+        and remed_item.auto_generated | default(false) | bool
+        and (remed_item.expected_output.split('.')[:2] | join('.')) in ['7.4','8.1']
+        and remed_item.package_revision_change | default(false) | bool)
+    fail_msg: 'El plan no cumple el mínimo upstream ni las condiciones de actualización limitada de 7.4/8.1. Un backport mínimo no cierra los CVE.'

@@ -1,6 +1,6 @@
 ---
-- name: VIKO | Piloto de correcciones por equipo
-  hosts: "{{ remed_target | default('viko_pruebas') }}"
+- name: VIKO | Correcciones PHP por equipo
+  hosts: "{{ remed_target | default('all') }}"
   gather_facts: false
   serial: 1
   ignore_unreachable: true
@@ -14,16 +14,15 @@
     ansible_ssh_timeout: "{{ remed_connect_timeout | int }}"
     remed_recon_dir: "{{ playbook_dir }}/../viko-recon"
   pre_tasks:
-    - name: Validar modo y grupo exclusivo del piloto
+    - name: Validar modo y planes de remediación
       ansible.builtin.assert:
         that:
           - not ansible_check_mode
           - remed_mode in ['plan', 'apply']
-          - inventory_hostname in groups.get('viko_pruebas', [])
           - remed_actions is sequence
           - remed_actions is not string
           - remed_actions is not mapping
-        fail_msg: 'Use modo plan/apply, sin --check, y equipos del grupo viko_pruebas.'
+        fail_msg: 'Use modo plan/apply, sin --check, y seleccione los destinos en el Límite de AAP.'
 
   tasks:
     - name: Inicializar evidencia de este Job
@@ -82,6 +81,12 @@
             that: _vuln_raw.status == 'recolectado'
             fail_msg: 'Sin evidencia válida: no se puede declarar PHP corregido ni Java evaluado.'
 
+        - name: Auditar paquetes y generaciones PHP antes de intervenir
+          ansible.builtin.include_tasks: tasks/audit_php.yml
+          vars:
+            remed_audit_slot: php_audit_before
+          when: not _remed_windows and ansible_facts.pkg_mgr == 'apt'
+
         - name: Seleccionar correcciones PHP
           ansible.builtin.include_tasks: tasks/php_autoplan.yml
 
@@ -115,6 +120,16 @@
             - remed_mode == 'apply'
             - _remed_actions | length > 0
 
+        - name: Auditar paquetes y generaciones PHP después de intervenir
+          ansible.builtin.include_tasks: tasks/audit_php.yml
+          vars:
+            remed_audit_slot: php_audit_after
+          when:
+            - not _remed_windows
+            - ansible_facts.pkg_mgr == 'apt'
+            - remed_mode == 'apply'
+            - _remed_actions | length > 0
+
         - name: Cerrar resultado del equipo sin declarar CVE corregidos
           ansible.builtin.set_fact:
             _remed_result: "{{ _remed_result | combine({'status': 'revision_requerida' if (_remed_stop or _php_auto.blockers | length > 0) else ('sin_cambios_propuestos_revisar_cobertura' if _remed_actions | length == 0 else ('plan_completado' if remed_mode == 'plan' else 'pendiente_validacion_runtime_web_y_cierre')), 'reason': (_php_auto.blockers | join('; ')) if _php_auto.blockers | length > 0 else 'Consultar cobertura y evidencia de las instalaciones revisadas.'}) }}"
@@ -123,7 +138,7 @@
           ansible.builtin.assert:
             that:
               - _vuln_raw.status == 'recolectado'
-              - _remed_result.php_post_validation.findings | selectattr('status', 'in', ['potencialmente_afectado', 'requiere_validacion', 'requiere_validacion_proveedor', 'no_evaluado']) | list | length == 0
+              - _remed_result.php_post_validation.findings | selectattr('status', 'in', ['potencialmente_afectado', 'requiere_validacion', 'requiere_validacion_proveedor', 'no_evaluado', 'backport_identificado_validacion_pendiente']) | list | length == 0
             fail_msg: 'PHP conserva observaciones pendientes o no pudo reevaluarse. Consultar evidencia anterior/posterior; no cerrar CVE.'
           when:
             - remed_mode == 'apply'
@@ -188,9 +203,18 @@
             per_host: false
             aggregate: false
 
-        - name: Mostrar resultado
+        - name: Mostrar resumen sin duplicar toda la evidencia del reconocimiento
           ansible.builtin.debug:
-            var: _remed_hosts
+            msg:
+              equipo: "{{ item.host }}"
+              estado: "{{ item.status }}"
+              motivo: "{{ item.reason | default('') }}"
+              acciones: "{{ item.actions }}"
+              plan_php: "{{ item.php_planning | default({}) }}"
+              evidencia: 'TXT y JSON completos en artifacts del Job'
+          loop: "{{ _remed_hosts }}"
+          loop_control:
+            label: "{{ item.host }}"
 
         - name: Marcar Job fallido si hay bloqueos o acciones fallidas
           ansible.builtin.assert:
@@ -199,3 +223,5 @@
               - item.validation is defined
             fail_msg: 'Hay equipos pendientes o fallidos. Consulte viko_remediacion en artifacts.'
           loop: "{{ _remed_hosts }}"
+          loop_control:
+            label: "{{ item.host }}"

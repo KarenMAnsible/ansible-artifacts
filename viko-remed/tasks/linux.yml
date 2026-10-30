@@ -61,6 +61,35 @@
   ansible.builtin.set_fact:
     _current: "{{ _current | combine({'changed': (_apt.changed | default(false)) or (_dnf.changed | default(false)) or (_zypper.changed | default(false))}) }}"
 
+- name: Leer revisiones exactas instaladas en Debian o Ubuntu
+  ansible.builtin.command:
+    argv: [dpkg-query, '-W', '-f=${db:Status-Status}\t${Version}', "{{ pkg.name }}"]
+  loop: "{{ remed_item.packages }}"
+  loop_control:
+    loop_var: pkg
+    label: "{{ pkg.name }}"
+  register: _installed_revisions
+  changed_when: false
+  when: ansible_facts.pkg_mgr == 'apt'
+
+- name: Confirmar todas las revisiones de paquetes solicitadas
+  ansible.builtin.assert:
+    that: item.stdout == 'installed' ~ '\t' ~ item.pkg.version
+    fail_msg: 'La revisión instalada no corresponde al plan; no se declara corregido.'
+  loop: "{{ _installed_revisions.results | default([]) }}"
+  loop_control:
+    label: "{{ item.pkg.name | default('paquete') }}"
+  when: ansible_facts.pkg_mgr == 'apt'
+
+- name: Comprobar configuración antes de reiniciar servicios PHP o Apache
+  ansible.builtin.command:
+    argv: "{{ ['/usr/sbin/apache2ctl', 'configtest'] if item == 'apache2.service' else (['/usr/sbin/httpd', '-t'] if item == 'httpd.service' else ['/usr/sbin/php-fpm' ~ (item | regex_search('[0-9]+[.][0-9]+')), '-t']) }}"
+  become: "{{ remed_linux_become | default(true) | bool }}"
+  changed_when: false
+  timeout: 60
+  loop: "{{ remed_item.services | default([]) }}"
+  when: ansible_facts.pkg_mgr == 'apt'
+
 - name: Reiniciar servicios indicados explícitamente en el plan
   ansible.builtin.service:
     name: "{{ item }}"

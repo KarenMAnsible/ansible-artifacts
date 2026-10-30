@@ -57,6 +57,8 @@
           os_version: "{{ ansible_facts.distribution_version }}"
           backup_reference: "{{ remed_backup_reference | default('') }}"
           observations: "{{ _vuln_raw.observations | default([]) | selectattr('component', 'equalto', 'php') | list }}"
+          vendor_sources: >-
+            {{ (lookup('file', remed_recon_dir ~ '/scripts/php_vendor_sources.json', errors='ignore') | default('{"records": []}', true) | from_json).records }}
           packages: []
           services: "{{ ansible_facts.services }}"
 

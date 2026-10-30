@@ -24,8 +24,8 @@ Duplicar las plantillas que ya funcionan, sin modificar las de reconocimiento. E
 - Proyecto: Reconocimiento-Vulnerabilidades-VIKO, sincronizado tras publicar.
 - Playbook: `viko-remed/remediacion_universal.yml`.
 - Inventario: el mismo de los pilotos, con sus alias exactos.
-- Grupo `viko_pruebas`: agregar los pilotos Linux/Windows elegidos; el playbook mantiene esta barrera de piloto.
-- Límite: `viko_pruebas` o el alias exacto de un piloto que pertenezca a ese grupo. No agregar un destino de procesamiento local.
+- No se requiere el grupo viko_pruebas. Seleccione explícitamente los destinos en Límite.
+- Límite: alias exacto del equipo que desea ejecutar. No agregar un destino de procesamiento local.
 - Tipo: Run. Forks: 1. Timeout: 5400 segundos. No usar Check.
 - Desactivar encuestas de usuario/contraseña. Retirar extra vars antiguas `ansible_user`, `ansible_password`, `ansible_ssh_pass`, `ansible_host` y puertos que contradigan los datos vigentes. Conservar variables de transporte y configuración necesarias, como WinRM basic/5985 cuando corresponda.
 
@@ -37,7 +37,7 @@ Variables iniciales:
 
 ```yaml
 vuln_use_vault: true
-remed_target: viko_pruebas
+remed_target: all
 remed_mode: plan
 remed_connect_timeout: 15
 remed_scan_seconds: 600
@@ -83,3 +83,7 @@ python3 /home/cloud-user/Integrar_Vault_Remediacion_VIKO.py --recoger NUMERO_JOB
 Primero busca los TXT en el montaje del host. Si no están, solicita un token AAP con permiso de lectura al Job, sin guardarlo, y recupera únicamente sus artefactos. Alternativamente permite `--artifact-json /ruta/job.json` para un Job/artifacts exportado, sin token. Con certificado autofirmado del AAP propio, añadir conscientemente `--sin-verificar-tls`; con certificado confiable no hace falta.
 
 La carpeta común se conserva si ya existe, incluido su enlace simbólico. No sobrescribe TXT distintos. No contiene contraseñas ni el diccionario de accesos. Revisar que se recuperó el número esperado de equipos y consultar cobertura/bloqueos; `no detectado` en una búsqueda parcial no acredita ausencia global.
+
+## Actualización V2
+
+Consultar ACTUALIZACION_PHP_V2.md para revisiones de paquetes, backports mínimos, auditoría y selección sin grupo.

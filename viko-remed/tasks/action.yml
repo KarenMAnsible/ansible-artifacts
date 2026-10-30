@@ -30,11 +30,11 @@
     - name: Validar salud de la aplicación antes de cambiar
       ansible.builtin.include_tasks: health.yml
 
-    - name: Aplicar solo cuando se solicitó apply y la versión difiere
+    - name: Aplicar cambios de versión o revisión exacta del paquete
       ansible.builtin.include_tasks: "{{ 'windows' if _remed_windows else 'linux' }}.yml"
       when:
         - remed_mode == 'apply'
-        - _before != remed_item.expected_output
+        - _before != remed_item.expected_output or (remed_item.package_revision_change | default(false) | bool)
 
     - name: Releer versión en apply
       ansible.builtin.include_tasks: probe.yml
