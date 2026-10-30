@@ -22,6 +22,7 @@ import zipfile
 
 HERE = Path(__file__).resolve().parent
 RULESET = json.loads((HERE / 'rules.json').read_text(encoding='utf-8'))
+SOURCE_SNAPSHOT = json.loads((HERE / 'php_vendor_sources.json').read_text(encoding='utf-8')) if (HERE / 'php_vendor_sources.json').is_file() else {'records': []}
 try:
     from zoneinfo import ZoneInfo
     MEXICO_TZ = ZoneInfo('America/Mexico_City')
@@ -132,6 +133,22 @@ def vendor_match(observation, rule, evidence):
     return None
 
 
+def package_source_evidence(observation):
+    """Exact source revision and local package association; never a fixed verdict."""
+    provenance = observation.get('provenance') or {}
+    if not isinstance(provenance, dict) or observation.get('host_file_identity_verified') is False:
+        return None
+    if 'ppa.launchpadcontent.net' not in provenance.get('origin_hosts', []): return None
+    for row in SOURCE_SNAPSHOT['records']:
+        if (row['source_package'] == provenance.get('source_package')
+                and row['source_version'] == provenance.get('source_version')
+                and row['source_version'] == observation.get('package_version')
+                and observation.get('package')
+                and row.get('packaging_hash_verified')):
+            return row
+    return None
+
+
 def classify(observation, rule, evidence):
     checked = vendor_match(observation, rule, evidence)
     if checked:
@@ -223,6 +240,15 @@ def build_report(payload):
                                status=status, note=note, action=rule['action'], source=rule['source'],
                                runtime_exposure='no_evaluada', application_owner='por_identificar')
                 finding.update({k: o.get(k, '') for k in ('runtime_state', 'loaded_generation', 'sha256', 'provenance')})
+                if rule['family'] == 'php':
+                    source_evidence = package_source_evidence(o)
+                    if source_evidence:
+                        finding['vendor_source_evidence'] = source_evidence
+                        patches = [p for p in source_evidence.get('patches_listed_in_series', []) if rule['cve'] in p.get('cves', [])]
+                        if patches and finding['status'] != 'corregido_segun_evidencia_proveedor':
+                            finding['status'] = 'backport_identificado_validacion_pendiente'
+                            finding['note'] = 'Revisión fuente exacta del PPA: parche incluido en la serie que identifica este CVE. Se declara backport mínimo EOL; no acredita corrección integral del runtime instalado.'
+                            finding['action'] = 'Validar artefacto instalado y configuración/carga efectiva; conservar evidencia de backport. No atribuir vulnerabilidad sólo por versión upstream ni certificar ausencia global.'
                 identity = '\0'.join(str(finding.get(k, '')) for k in ('host', 'cve', 'component', 'path', 'version', 'package_version', 'version_source'))
                 finding['id'] = hashlib.sha256(identity.encode()).hexdigest()[:20]
                 findings.append(finding)
@@ -250,7 +276,7 @@ def build_report(payload):
         own = [f for f in findings if f['host'] == hs['host']]
         for family in checks:
             states = [f['status'] for f in own if f['family'] == family and f.get('cve')]
-            priority = ['potencialmente_afectado', 'requiere_validacion_proveedor', 'requiere_validacion',
+            priority = ['potencialmente_afectado', 'backport_identificado_validacion_pendiente', 'requiere_validacion_proveedor', 'requiere_validacion',
                         'requiere_validar_migracion_upload', 'no_evaluado', 'no_detectado_busqueda_parcial',
                         'no_detectado_en_rutas_revisadas', 'no_detectado_en_fuentes_consultadas', 'fuera_rango_version', 'corregido_segun_evidencia_proveedor']
             hs['family_status'][family] = next((s for s in priority if s in states), 'no_evaluado')
@@ -299,7 +325,8 @@ def enrich_php(report):
             finding['result'] = php_result(finding)
             finding['evidence'] = json.dumps({'version_source': finding.get('version_source'),
                 'provenance': finding.get('provenance', {}), 'sha256': finding.get('sha256', ''),
-                'loaded_generation': finding.get('loaded_generation', 'no_verificada')}, ensure_ascii=False, sort_keys=True)
+                'loaded_generation': finding.get('loaded_generation', 'no_verificada'),
+                'vendor_source_evidence': finding.get('vendor_source_evidence', {})}, ensure_ascii=False, sort_keys=True)
             if finding['status'] == 'fuera_rango_version':
                 finding['action'] = 'Versión observada supera el mínimo upstream de este CVE. Verificar procedencia del artefacto y generación cargada; no se certifica un backport.'
             if finding['result'] == 'sin_hallazgo_en_alcance_consultado':
@@ -405,7 +432,7 @@ def php_visible_status(host):
         return 'NO VULNERABLE PARA LOS CVE VERIFICADOS (CORRECCIÓN VERIFICADA)'
     if result == 'sin_hallazgo_en_alcance_consultado':
         return 'NO VULNERABLE EN EL ALCANCE CONSULTADO (SIN HALLAZGOS)'
-    return 'PENDIENTE / NO EVALUADO'
+    return 'PENDIENTE DE VALIDACIÓN'
 
 
 def render_text(report):
