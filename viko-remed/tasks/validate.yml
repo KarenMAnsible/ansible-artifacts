@@ -1,0 +1,58 @@
+---
+- name: Validar identificación, alcance y plataforma del plan
+  ansible.builtin.assert:
+    that:
+      - remed_item.id | default('') | length > 0
+      - remed_item.family | default('') == 'php'
+      - remed_item.cves | default([]) | length > 0
+      - remed_item.cves is sequence and remed_item.cves is not string
+      - remed_item.cves | difference(['CVE-2026-109618', 'CVE-2026-109619']) | length == 0
+      - remed_item.vendor_advisory | default('') is match('https://')
+      - remed_item.os_family | default('') == ansible_facts.os_family
+      - remed_item.os_version | default('') | string == ansible_facts.distribution_version | string
+      - remed_item.method | default('') in ['linux_packages', 'windows_msi']
+      - (remed_item.method == 'windows_msi') == (_remed_windows | bool)
+      - remed_item.expected_output | default('') | length > 0
+      - remed_item.expected_output is match('^[0-9]+[.][0-9]+[.][0-9]+$')
+      - (remed_item.expected_output.split('.')[:2] | join('.')) in ['8.2', '8.3', '8.4', '8.5']
+      - remed_item.expected_output is version({'8.2':'8.2.35','8.3':'8.3.36','8.4':'8.4.27','8.5':'8.5.12'}[remed_item.expected_output.split('.')[:2] | join('.')], '>=')
+      - remed_item.health_regex | default('') | length > 0
+      - remed_item.services | default([]) is sequence
+      - remed_item.services | default([]) is not string
+      - _remed_actions | map(attribute='id') | unique | length == _remed_actions | length
+      - remed_mode != 'apply' or remed_item.backup_reference | default('') | length > 0
+      - remed_mode != 'apply' or (remed_item.services | default([]) | length == 0) or (remed_allow_service_restart | default(false) | bool)
+    fail_msg: 'Plan incompleto o incompatible. Fije SO exacto, CVE, aviso del proveedor, comprobaciones y referencia de respaldo para apply.'
+
+- name: Validar método Linux
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.pkg_mgr in ['apt', 'dnf', 'zypper']
+      - remed_item.packages | default([]) | length > 0
+      - remed_item.packages is sequence and remed_item.packages is not string
+      - remed_item.probe_argv | default([]) | length > 0
+      - remed_item.probe_argv is sequence and remed_item.probe_argv is not string
+      - remed_item.health_argv | default([]) | length > 0
+      - remed_item.health_argv is sequence and remed_item.health_argv is not string
+  when: not _remed_windows
+
+- name: Exigir nombres concretos y versiones exactas sin comodines
+  ansible.builtin.assert:
+    that:
+      - pkg.name | default('') is match('^[a-zA-Z0-9][a-zA-Z0-9+_.-]*$')
+      - pkg.version | default('') | string is match('^[a-zA-Z0-9][a-zA-Z0-9+:~_.-]*$')
+  loop: "{{ remed_item.packages | default([]) }}"
+  loop_control:
+    loop_var: pkg
+  when: not _remed_windows
+
+- name: Validar instalador MSI y comprobaciones Windows
+  ansible.builtin.assert:
+    that:
+      - remed_item.source | default('') is match('^(https://|[A-Za-z]:\\)')
+      - remed_item.source | lower is search('[.]msi$')
+      - remed_item.sha256 | default('') is match('^[a-fA-F0-9]{64}$')
+      - remed_item.product_id | default('') is match('^[{][0-9a-fA-F-]{36}[}]$')
+      - remed_item.probe_script | default('') | length > 0
+      - remed_item.health_script | default('') | length > 0
+  when: _remed_windows

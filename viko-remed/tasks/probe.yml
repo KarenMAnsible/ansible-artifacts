@@ -1,0 +1,32 @@
+---
+- name: Comprobar componente Linux con ruta explícita
+  ansible.builtin.command:
+    argv: "{{ remed_item.probe_argv }}"
+  become: "{{ remed_linux_become | default(true) | bool }}"
+  register: _probe_linux
+  changed_when: false
+  async: 60
+  poll: 5
+  no_log: true
+  when: not _remed_windows
+
+- name: Comprobar componente Windows con ruta explícita
+  ansible.windows.win_shell: "{{ remed_item.probe_script }}"
+  register: _probe_windows
+  changed_when: false
+  async: 60
+  poll: 5
+  no_log: true
+  when: _remed_windows
+
+- name: Conservar salida de versión sin salida de instaladores
+  ansible.builtin.set_fact:
+    _probe_output: "{{ (_probe_windows.stdout if _remed_windows else _probe_linux.stdout) | trim }}"
+  no_log: true
+
+- name: Limitar la evidencia a una versión breve
+  ansible.builtin.assert:
+    that:
+      - _probe_output | length > 0
+      - _probe_output | length <= 256
+    fail_msg: 'La sonda debe devolver únicamente una versión breve y sin secretos.'

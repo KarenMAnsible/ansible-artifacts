@@ -1,0 +1,70 @@
+---
+- name: Registrar acciones omitidas tras un fallo previo
+  ansible.builtin.set_fact:
+    _remed_result: "{{ _remed_result | combine({'actions': _remed_result.actions + [{'id': remed_item.id, 'cves': remed_item.cves, 'status': 'omitido_por_fallo_previo'}]}) }}"
+  when: _remed_stop
+
+- name: Procesar componente y conservar errores parciales
+  when: not _remed_stop
+  block:
+    - name: Inicializar evidencia de la acción
+      ansible.builtin.set_fact:
+        _current:
+          id: "{{ remed_item.id }}"
+          family: "{{ remed_item.family }}"
+          cves: "{{ remed_item.cves }}"
+          vendor_advisory: "{{ remed_item.vendor_advisory }}"
+          status: pendiente
+          changed: false
+          reboot_required: false
+          validation_scope: "{{ remed_item.validation_scope | default('Comprobaciones del plan; repetir assessment y verificar runtime web') }}"
+
+    - name: Leer versión antes de modificar
+      ansible.builtin.include_tasks: probe.yml
+
+    - name: Guardar versión inicial
+      ansible.builtin.set_fact:
+        _before: "{{ _probe_output }}"
+        _current: "{{ _current | combine({'before': _probe_output, 'expected': remed_item.expected_output, 'status': 'planificado'}) }}"
+
+    - name: Validar salud de la aplicación antes de cambiar
+      ansible.builtin.include_tasks: health.yml
+
+    - name: Aplicar solo cuando se solicitó apply y la versión difiere
+      ansible.builtin.include_tasks: "{{ 'windows' if _remed_windows else 'linux' }}.yml"
+      when:
+        - remed_mode == 'apply'
+        - _before != remed_item.expected_output
+
+    - name: Releer versión en apply
+      ansible.builtin.include_tasks: probe.yml
+      when: remed_mode == 'apply'
+
+    - name: Guardar versión final antes de validarla
+      ansible.builtin.set_fact:
+        _current: "{{ _current | combine({'after': _probe_output}) }}"
+      when: remed_mode == 'apply'
+
+    - name: Exigir versión esperada
+      ansible.builtin.assert:
+        that: _probe_output == remed_item.expected_output
+        fail_msg: 'La versión final no corresponde al plan. Revisión requerida; no se declara corrección.'
+      when: remed_mode == 'apply'
+
+    - name: Validar salud después del cambio
+      ansible.builtin.include_tasks: health.yml
+      when: remed_mode == 'apply'
+
+    - name: Registrar resultado técnico sin cierre automático del CVE
+      ansible.builtin.set_fact:
+        _current: "{{ _current | combine({'status': ('pendiente_reinicio' if _current.reboot_required else 'version_y_salud_validadas_pendiente_reassessment') if remed_mode == 'apply' else 'planificado', 'health': 'validada'}) }}"
+  rescue:
+    - name: Conservar fallo, posibles cambios y detener acciones siguientes
+      ansible.builtin.set_fact:
+        _remed_stop: true
+        _current: "{{ _current | combine({'status': 'fallo_revision_requerida', 'reason': 'Revisar evento fallido. Puede haber cambios parciales; no se ejecutó rollback automático.'}) }}"
+  always:
+    - name: Adjuntar resultado al equipo
+      ansible.builtin.set_fact:
+        _remed_result: "{{ _remed_result | combine({'actions': _remed_result.actions + [_current]}) }}"
+      when: not (_current is undefined) and (_current.id | default('') == remed_item.id)

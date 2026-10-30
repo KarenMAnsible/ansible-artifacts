@@ -1,0 +1,71 @@
+---
+- name: Preparar especificaciones exactas del gestor
+  ansible.builtin.set_fact:
+    _specs: []
+
+- name: Formar nombre y versión por paquete
+  ansible.builtin.set_fact:
+    _specs: "{{ _specs + [pkg.name ~ ('-' if ansible_facts.pkg_mgr == 'dnf' else '=') ~ (pkg.version | string)] }}"
+  loop: "{{ remed_item.packages }}"
+  loop_control:
+    loop_var: pkg
+
+- name: Señalar que una transacción puede producir cambios parciales
+  ansible.builtin.set_fact:
+    _current: "{{ _current | combine({'changed': 'posible; transaccion iniciada'}) }}"
+
+- name: Instalar versiones exactas Debian o Ubuntu
+  ansible.builtin.apt:
+    name: "{{ _specs }}"
+    state: present
+    update_cache: true
+    allow_downgrade: false
+    allow_unauthenticated: false
+    fail_on_autoremove: true
+    force_apt_get: true
+  become: "{{ remed_linux_become | default(true) | bool }}"
+  register: _apt
+  async: 600
+  poll: 5
+  when: ansible_facts.pkg_mgr == 'apt'
+
+- name: Instalar versiones exactas Red Hat y compatibles
+  ansible.builtin.dnf:
+    name: "{{ _specs }}"
+    state: present
+    update_cache: true
+    allow_downgrade: false
+    allowerasing: false
+    disable_gpg_check: false
+  become: "{{ remed_linux_become | default(true) | bool }}"
+  register: _dnf
+  async: 600
+  poll: 5
+  when: ansible_facts.pkg_mgr == 'dnf'
+
+- name: Instalar versiones exactas SUSE
+  community.general.zypper:
+    name: "{{ _specs }}"
+    state: present
+    update_cache: true
+    disable_gpg_check: false
+    force: false
+    force_resolution: false
+  become: "{{ remed_linux_become | default(true) | bool }}"
+  register: _zypper
+  async: 600
+  poll: 5
+  when: ansible_facts.pkg_mgr == 'zypper'
+
+- name: Registrar transacción terminada
+  ansible.builtin.set_fact:
+    _current: "{{ _current | combine({'changed': (_apt.changed | default(false)) or (_dnf.changed | default(false)) or (_zypper.changed | default(false))}) }}"
+
+- name: Reiniciar servicios indicados explícitamente en el plan
+  ansible.builtin.service:
+    name: "{{ item }}"
+    state: restarted
+  async: 120
+  poll: 5
+  become: "{{ remed_linux_become | default(true) | bool }}"
+  loop: "{{ remed_item.services | default([]) }}"

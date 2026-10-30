@@ -1,0 +1,46 @@
+---
+- name: Diagnosticar agente sin ejecutar instaladores
+  block:
+    - name: Inventariar agente Linux en rutas estándar
+      ansible.builtin.script:
+        cmd: "{{ playbook_dir }}/scripts/agent_inventory.py"
+        executable: "{{ ansible_facts.python.executable }}"
+      become: "{{ remed_linux_become | default(true) | bool }}"
+      register: _agent_linux
+      changed_when: false
+      timeout: 60
+      when: not _remed_windows
+
+    - name: Inventariar agente Windows en rutas estándar
+      ansible.windows.win_shell: "{{ lookup('ansible.builtin.file', playbook_dir ~ '/scripts/agent_inventory.ps1') }}"
+      register: _agent_windows
+      changed_when: false
+      async: 60
+      poll: 5
+      when: _remed_windows
+
+    - name: Interpretar inventario del agente
+      ansible.builtin.set_fact:
+        _agent_raw: "{{ (_agent_windows.stdout if _remed_windows else _agent_linux.stdout) | from_json }}"
+        _agent_results: []
+
+    - name: Registrar recomendación sin alterar archivos o servicios
+      ansible.builtin.set_fact:
+        _agent_results: >-
+          {{ _agent_results + [item | combine({
+            'status': 'requiere_revision' if item.errors | length > 0 else (
+              'reinstalacion_recomendada' if (item.version | length > 0 and item.version is version('3.1.31', '<')) else (
+              'requiere_revision' if item.log4j_files | length > 0 or item.version | length == 0 else 'sin_indicios_en_alcance')),
+            'baseline': '3.1.31',
+            'automatic_reinstall': false,
+            'notice': 'Marcador y rutas limitadas; confirmar version efectiva, integridad y aplicabilidad. La presencia de un JAR no prueba por si sola vulnerabilidad.'
+          })] }}
+      loop: "{{ _agent_raw.agents }}"
+
+    - name: Adjuntar diagnóstico de solo lectura
+      ansible.builtin.set_fact:
+        _remed_result: "{{ _remed_result | combine({'agent_diagnostic': {'agents': _agent_results, 'status': 'evaluado' if _agent_results | length > 0 else 'no_detectado_en_rutas_estandar', 'automatic_reinstall': false, 'coverage': _agent_raw.coverage}}) }}"
+  rescue:
+    - name: Conservar diagnóstico pendiente sin bloquear planes PHP
+      ansible.builtin.set_fact:
+        _remed_result: "{{ _remed_result | combine({'agent_diagnostic': {'status': 'no_evaluado', 'automatic_reinstall': false, 'reason': 'No se pudo completar el diagnostico; revisar el evento fallido.'}}) }}"

@@ -1,0 +1,112 @@
+---
+- name: Inicializar planificación PHP
+  ansible.builtin.set_fact:
+    _php_auto:
+      status: plan_manual
+      actions: []
+      blockers: []
+      checked: []
+
+- name: Preparar corrección automática Linux sin plan manual
+  when:
+    - remed_actions | length == 0
+    - not _remed_windows
+  block:
+    - name: Consultar servicios para renovación de workers PHP
+      ansible.builtin.service_facts:
+      become: "{{ remed_linux_become | default(true) | bool }}"
+
+    - name: Actualizar índices apt si PHP fue detectado
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 300
+      become: "{{ remed_linux_become | default(true) | bool }}"
+      async: 180
+      poll: 5
+      when:
+        - ansible_facts.pkg_mgr == 'apt'
+        - _vuln_raw.observations | default([]) | selectattr('component', 'equalto', 'php') | list | length > 0
+
+    - name: Actualizar metadatos dnf si PHP fue detectado
+      ansible.builtin.command:
+        argv: [dnf, '-q', makecache]
+      become: "{{ remed_linux_become | default(true) | bool }}"
+      changed_when: false
+      async: 180
+      poll: 5
+      when:
+        - ansible_facts.pkg_mgr == 'dnf'
+        - _vuln_raw.observations | default([]) | selectattr('component', 'equalto', 'php') | list | length > 0
+
+    - name: Actualizar metadatos SUSE si PHP fue detectado
+      ansible.builtin.command:
+        argv: [zypper, '--non-interactive', refresh]
+      become: "{{ remed_linux_become | default(true) | bool }}"
+      changed_when: false
+      async: 180
+      poll: 5
+      when:
+        - ansible_facts.pkg_mgr == 'zypper'
+        - _vuln_raw.observations | default([]) | selectattr('component', 'equalto', 'php') | list | length > 0
+
+    - name: Preparar datos limitados del planificador
+      ansible.builtin.set_fact:
+        _php_auto_config:
+          manager: "{{ ansible_facts.pkg_mgr }}"
+          os_family: "{{ ansible_facts.os_family }}"
+          os_version: "{{ ansible_facts.distribution_version }}"
+          backup_reference: "{{ remed_backup_reference | default('') }}"
+          observations: "{{ _vuln_raw.observations | default([]) | selectattr('component', 'equalto', 'php') | list }}"
+          packages: []
+          services: "{{ ansible_facts.services }}"
+
+    - name: Seleccionar versiones exactas corregidas en repositorios configurados
+      ansible.builtin.script:
+        cmd: "{{ playbook_dir }}/scripts/php_autoplan.py {{ _php_auto_config | to_json | b64encode | quote }}"
+        executable: "{{ ansible_facts.python.executable }}"
+      become: "{{ remed_linux_become | default(true) | bool }}"
+      changed_when: false
+      register: _php_auto_raw
+      timeout: 210
+      no_log: true
+
+    - name: Incorporar selección o bloqueos PHP
+      ansible.builtin.set_fact:
+        _php_auto: "{{ (_php_auto_raw.stdout | regex_findall('VIKO_PHP_PLAN:([^\r\n]+)') | last) | from_json }}"
+  rescue:
+    - name: Registrar bloqueo de selección PHP
+      ansible.builtin.set_fact:
+        _php_auto:
+          status: bloqueado
+          actions: []
+          checked: []
+          blockers: ['No se pudo completar la consulta de paquetes/repositorios. Revisar el evento fallido; PHP no se declara corregido.']
+
+- name: Registrar requisitos de PHP Windows sin plan de instalación
+  ansible.builtin.set_fact:
+    _php_auto:
+      status: bloqueado
+      actions: []
+      checked: []
+      blockers: ['PHP Windows requiere identificar ruta, TS/NTS, arquitectura, extensiones, servicios y paquete de actualización compatible. No se sustituye automáticamente una instalación ZIP/XAMPP/IIS desconocida.']
+  when:
+    - remed_actions | length == 0
+    - _remed_windows
+    - _vuln_raw.observations | default([]) | selectattr('component', 'equalto', 'php') | list | length > 0
+
+- name: Registrar ausencia de evidencia PHP Windows
+  ansible.builtin.set_fact:
+    _php_auto:
+      status: sin_cambios_propuestos
+      actions: []
+      checked: []
+      blockers: []
+  when:
+    - remed_actions | length == 0
+    - _remed_windows
+    - _vuln_raw.observations | default([]) | selectattr('component', 'equalto', 'php') | list | length == 0
+
+- name: Seleccionar planes PHP efectivos y registrar limitaciones
+  ansible.builtin.set_fact:
+    _remed_actions: "{{ remed_actions if remed_actions | length > 0 else _php_auto.actions }}"
+    _remed_result: "{{ _remed_result | combine({'php_planning': _php_auto}) }}"

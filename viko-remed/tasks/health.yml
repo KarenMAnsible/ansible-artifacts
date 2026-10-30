@@ -1,0 +1,25 @@
+---
+- name: Prueba funcional Linux
+  ansible.builtin.command:
+    argv: "{{ remed_item.health_argv }}"
+  become: "{{ remed_linux_become | default(true) | bool }}"
+  changed_when: false
+  async: 60
+  poll: 5
+  register: _health_linux
+  no_log: true
+  when: not _remed_windows
+
+- name: Prueba funcional Windows
+  ansible.windows.win_shell: "{{ remed_item.health_script }}"
+  changed_when: false
+  async: 60
+  poll: 5
+  register: _health_windows
+  no_log: true
+  when: _remed_windows
+
+- name: Validar respuesta funcional
+  ansible.builtin.assert:
+    that: (_health_windows.stdout if _remed_windows else _health_linux.stdout) is search(remed_item.health_regex)
+    fail_msg: 'Falló comprobación funcional; revisar intervención y respaldo.'

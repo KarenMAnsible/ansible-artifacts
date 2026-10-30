@@ -1,0 +1,201 @@
+---
+- name: VIKO | Piloto de correcciones por equipo
+  hosts: "{{ remed_target | default('viko_pruebas') }}"
+  gather_facts: false
+  serial: 1
+  ignore_unreachable: true
+  vars:
+    remed_mode: apply
+    remed_allow_service_restart: true
+    remed_actions: []
+    remed_agent_diagnostic: true
+    vuln_use_vault: false
+    remed_connect_timeout: 15
+    ansible_ssh_timeout: "{{ remed_connect_timeout | int }}"
+    remed_recon_dir: "{{ playbook_dir }}/../viko-recon"
+  pre_tasks:
+    - name: Validar modo y grupo exclusivo del piloto
+      ansible.builtin.assert:
+        that:
+          - not ansible_check_mode
+          - remed_mode in ['plan', 'apply']
+          - inventory_hostname in groups.get('viko_pruebas', [])
+          - remed_actions is sequence
+          - remed_actions is not string
+          - remed_actions is not mapping
+        fail_msg: 'Use modo plan/apply, sin --check, y equipos del grupo viko_pruebas.'
+
+  tasks:
+    - name: Inicializar evidencia de este Job
+      ansible.builtin.set_fact:
+        _remed_windows: "{{ (ansible_connection | default('ssh')) in ['winrm', 'psrp'] or (ansible_shell_type | default('')) == 'powershell' }}"
+        _remed_stop: false
+        _remed_result:
+          host: "{{ inventory_hostname }}"
+          address: "{{ ansible_host | default(inventory_hostname) }}"
+          mode: "{{ remed_mode }}"
+          report_utc: "{{ now(utc=true, fmt='%Y-%m-%dT%H:%M:%S+00:00') }}"
+          status: no_evaluado
+          os: sin_identificar
+          actions: []
+          reason: Sin evidencia de conexión o detección completada.
+
+    - name: Detectar plataforma y validar planes antes de modificar
+      block:
+        # VIKO_REMED_VAULT_V1 — antes de cualquier conexión
+        - name: Preparar acceso sin copiar contraseñas al reporte
+          ansible.builtin.include_tasks: tasks/access.yml
+
+        - name: Obtener facts Linux
+          ansible.builtin.setup:
+          when: not _remed_windows
+
+        - name: Obtener facts Windows
+          ansible.windows.setup:
+          when: _remed_windows
+
+        - name: Confirmar plataforma real
+          ansible.builtin.assert:
+            that:
+              - (ansible_facts.os_family == 'Windows') == (_remed_windows | bool)
+
+        - name: Registrar SO y necesidad de plan específico
+          ansible.builtin.set_fact:
+            _remed_result: "{{ _remed_result | combine({'os': ansible_facts.distribution ~ ' ' ~ ansible_facts.distribution_version, 'status': 'listo_para_plan' if remed_actions | length == 0 else 'plan_validado', 'reason': 'Sin acciones: falta versión, paquete o instalador y comprobación del componente.' if remed_actions | length == 0 else ''}) }}"
+
+        - name: Revisar agente sin reinstalar
+          ansible.builtin.include_tasks: tasks/agent_diagnostic.yml
+          when: remed_agent_diagnostic | bool
+
+        - name: Recolectar PHP, Log4j y Struts sin cambios
+          ansible.builtin.include_tasks: tasks/scan.yml
+
+        - name: Conservar reconocimiento previo
+          ansible.builtin.set_fact:
+            _remed_before_raw: "{{ _vuln_raw }}"
+
+        - name: Evaluar evidencia y necesidades de remediación
+          ansible.builtin.include_tasks: tasks/classify_scan.yml
+
+        - name: Exigir recolección válida antes de decidir correcciones
+          ansible.builtin.assert:
+            that: _vuln_raw.status == 'recolectado'
+            fail_msg: 'Sin evidencia válida: no se puede declarar PHP corregido ni Java evaluado.'
+
+        - name: Seleccionar correcciones PHP
+          ansible.builtin.include_tasks: tasks/php_autoplan.yml
+
+        - name: Validar todos los planes antes de ejecutar el primero
+          ansible.builtin.include_tasks: tasks/validate.yml
+          loop: "{{ _remed_actions }}"
+          loop_control:
+            loop_var: remed_item
+            label: "{{ remed_item.id | default('sin_id') }}"
+
+        - name: Ejecutar acciones secuencialmente y detener cambios tras un fallo
+          ansible.builtin.include_tasks: tasks/action.yml
+          loop: "{{ _remed_actions }}"
+          loop_control:
+            loop_var: remed_item
+            label: "{{ remed_item.id }}"
+
+        - name: Repetir reconocimiento PHP tras la intervención
+          ansible.builtin.include_tasks: tasks/scan.yml
+          vars:
+            remed_scan_checks: [php]
+          when:
+            - remed_mode == 'apply'
+            - _remed_actions | length > 0
+
+        - name: Conservar evidencia PHP posterior
+          ansible.builtin.include_tasks: tasks/classify_scan.yml
+          vars:
+            _validation_slot: php_post_validation
+          when:
+            - remed_mode == 'apply'
+            - _remed_actions | length > 0
+
+        - name: Cerrar resultado del equipo sin declarar CVE corregidos
+          ansible.builtin.set_fact:
+            _remed_result: "{{ _remed_result | combine({'status': 'revision_requerida' if (_remed_stop or _php_auto.blockers | length > 0) else ('sin_cambios_propuestos_revisar_cobertura' if _remed_actions | length == 0 else ('plan_completado' if remed_mode == 'plan' else 'pendiente_validacion_runtime_web_y_cierre')), 'reason': (_php_auto.blockers | join('; ')) if _php_auto.blockers | length > 0 else 'Consultar cobertura y evidencia de las instalaciones revisadas.'}) }}"
+
+        - name: Exigir evidencia PHP posterior y registrar instalaciones restantes
+          ansible.builtin.assert:
+            that:
+              - _vuln_raw.status == 'recolectado'
+              - _remed_result.php_post_validation.findings | selectattr('status', 'in', ['potencialmente_afectado', 'requiere_validacion', 'requiere_validacion_proveedor', 'no_evaluado']) | list | length == 0
+            fail_msg: 'PHP conserva observaciones pendientes o no pudo reevaluarse. Consultar evidencia anterior/posterior; no cerrar CVE.'
+          when:
+            - remed_mode == 'apply'
+            - _remed_actions | length > 0
+      rescue:
+        - name: Registrar bloqueo de preparación
+          ansible.builtin.set_fact:
+            _remed_result: "{{ _remed_result | combine({'status': 'bloqueado', 'reason': 'Falló detección, recolección, validación o comprobación posterior. Revisar eventos y cambios parciales del Job.'}) }}"
+
+  post_tasks:
+    - name: Publicar evidencia desde el entorno de ejecución
+      delegate_to: localhost
+      connection: local
+      become: false
+      vars:
+        ansible_connection: local
+        ansible_python_interpreter: "{{ ansible_playbook_python }}"
+      run_once: true
+      block:
+        - name: Inicializar consolidado
+          ansible.builtin.set_fact:
+            _remed_hosts: []
+
+        - name: Incorporar resultados y equipos sin respuesta
+          ansible.builtin.set_fact:
+            _remed_hosts: "{{ _remed_hosts + [hostvars[item]._remed_result | default({'host': item, 'status': 'no_evaluado', 'reason': 'No se recibió evidencia; revisar conexión, permisos y eventos del Job.', 'actions': []})] }}"
+          loop: "{{ ansible_play_hosts_all }}"
+          when: hostvars[item]._remed_result is defined
+
+        - name: Crear directorio temporal privado
+          ansible.builtin.tempfile:
+            state: directory
+            prefix: viko-remed-
+          register: _remed_tmp
+
+        - name: Escribir evidencia JSON
+          ansible.builtin.copy:
+            dest: "{{ _remed_tmp.path }}/remediacion.json"
+            content: "{{ {'hosts': _remed_hosts, 'notice': 'Validación técnica por componente. Requiere nuevo assessment y cierre de Seguridad. Sin rollback automático.'} | to_nice_json }}"
+            mode: '0600'
+
+        - name: Crear TXT por equipo y paquete recuperable del Job
+          ansible.builtin.command:
+            argv:
+              - "{{ ansible_playbook_python }}"
+              - "{{ playbook_dir }}/scripts/publish_reports.py"
+              - --input
+              - "{{ _remed_tmp.path }}/remediacion.json"
+              - --out
+              - "{{ _remed_tmp.path }}/publicados"
+              - --shared-root
+              - "{{ remed_shared_root | default('/viko-reportes') }}"
+              - --job-id
+              - "{{ awx_job_id | default('sin_job') | string }}"
+          register: _remed_published
+          changed_when: false
+          no_log: true
+
+        - name: Conservar artefactos sin datos de acceso
+          ansible.builtin.set_stats:
+            data: "{{ _remed_published.stdout | from_json }}"
+            per_host: false
+            aggregate: false
+
+        - name: Mostrar resultado
+          ansible.builtin.debug:
+            var: _remed_hosts
+
+        - name: Marcar Job fallido si hay bloqueos o acciones fallidas
+          ansible.builtin.assert:
+            that:
+              - item.status not in ['no_evaluado', 'bloqueado', 'revision_requerida']
+              - item.validation is defined
+            fail_msg: 'Hay equipos pendientes o fallidos. Consulte viko_remediacion en artifacts.'
+          loop: "{{ _remed_hosts }}"

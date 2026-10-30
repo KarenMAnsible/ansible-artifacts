@@ -1,0 +1,38 @@
+---
+- name: Clasificar evidencia con las reglas compartidas del proyecto
+  delegate_to: localhost
+  connection: local
+  become: false
+  vars:
+    ansible_connection: local
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+  block:
+    - name: Crear entrada privada temporal
+      ansible.builtin.tempfile:
+        state: directory
+        prefix: viko-validacion-
+      register: _validation_tmp
+
+    - name: Guardar evidencia de este servidor
+      ansible.builtin.copy:
+        dest: "{{ _validation_tmp.path }}/raw.json"
+        content: "{{ _vuln_raw | to_nice_json }}"
+        mode: '0600'
+
+    - name: Evaluar CVE sin modificar componentes Java
+      ansible.builtin.command:
+        argv:
+          - "{{ ansible_playbook_python }}"
+          - "{{ playbook_dir }}/scripts/triage.py"
+          - --input
+          - "{{ _validation_tmp.path }}/raw.json"
+          - --recon-dir
+          - "{{ remed_recon_dir }}"
+          - --host
+          - "{{ inventory_hostname }}"
+      changed_when: false
+      register: _validation_classified
+
+    - name: Adjuntar clasificación completa
+      ansible.builtin.set_fact:
+        _remed_result: "{{ _remed_result | combine({(_validation_slot | default('validation')): _validation_classified.stdout | from_json}) }}"

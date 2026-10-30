@@ -1,0 +1,34 @@
+- name: Cargar configuración del reconocimiento existente
+  ansible.builtin.include_vars:
+    file: '{{ remed_recon_dir }}/vars/defaults.yml'
+- name: Preparar reconocimiento sin cambios
+  ansible.builtin.set_fact:
+    _vuln_raw:
+      status: no_evaluado
+      reason: El recolector no completó
+    _vuln_config:
+      checks: '{{ remed_scan_checks | default([''php'', ''log4j'', ''struts'']) }}'
+      scan_seconds: '{{ remed_scan_seconds | default(600) | int }}'
+      command_timeout: '{{ (vuln_command_timeout | default(vuln_defaults_command_timeout)) | int }}'
+      max_files: '{{ (vuln_max_files | default(vuln_defaults_max_files)) | int }}'
+      max_archives: '{{ (vuln_max_archives | default(vuln_defaults_max_archives)) | int }}'
+      max_archive_mb: '{{ (vuln_max_archive_mb | default(vuln_defaults_max_archive_mb)) | int }}'
+      max_nested_mb: '{{ (vuln_max_nested_mb | default(vuln_defaults_max_nested_mb)) | int }}'
+      max_total_nested_mb: '{{ (vuln_max_total_nested_mb | default(vuln_defaults_max_total_nested_mb)) | int }}'
+      max_entries: '{{ (vuln_max_entries | default(vuln_defaults_max_entries)) | int }}'
+      archive_depth: '{{ (vuln_archive_depth | default(vuln_defaults_archive_depth)) | int }}'
+      max_observations: '{{ (vuln_max_observations | default(vuln_defaults_max_observations)) | int }}'
+      run_php_version: '{{ (vuln_run_php_version | default(vuln_defaults_run_php_version)) | bool }}'
+      container_inventory: '{{ (vuln_container_inventory | default(vuln_defaults_container_inventory)) | bool }}'
+      follow_mounts: '{{ (vuln_follow_mounts | default(vuln_defaults_follow_mounts)) | bool }}'
+      linux_roots: '{{ remed_linux_roots | default(vuln_defaults_linux_roots + [''/CloudrResetPwdAgent'', ''/CloudResetPwdAgent'', ''/CloudResetPwdUpdateAgent''])
+        }}'
+      linux_excludes: '{{ (vuln_linux_excludes | default(vuln_defaults_linux_excludes)) }}'
+      windows_roots: '{{ remed_windows_roots | default(vuln_defaults_windows_roots) }}'
+      windows_excludes: '{{ (vuln_windows_excludes | default(vuln_defaults_windows_excludes)) }}'
+- name: Recopilar evidencia por plataforma
+  ansible.builtin.include_tasks: collect_{{ 'windows' if _remed_windows else 'linux' }}.yml
+  vars:
+    vuln_scan_seconds: '{{ remed_scan_seconds | default(600) | int }}'
+    vuln_task_timeout: '{{ (remed_scan_seconds | default(600) | int) + 60 }}'
+    vuln_become: '{{ remed_linux_become | default(true) }}'

@@ -1,0 +1,30 @@
+---
+- name: Señalar que la instalación puede producir cambios parciales
+  ansible.builtin.set_fact:
+    _current: "{{ _current | combine({'changed': 'posible; instalacion iniciada'}) }}"
+
+- name: Instalar actualización MSI del proveedor validada por SHA256
+  ansible.windows.win_package:
+    path: "{{ remed_item.source }}"
+    product_id: "{{ remed_item.product_id }}"
+    provider: msi
+    checksum: "{{ remed_item.sha256 }}"
+    checksum_algorithm: sha256
+    state: present
+    expected_return_code: [0, 3010]
+  register: _msi
+  async: 600
+  poll: 5
+  no_log: true
+
+- name: Registrar cambios y necesidad de reinicio
+  ansible.builtin.set_fact:
+    _current: "{{ _current | combine({'changed': _msi.changed, 'reboot_required': _msi.reboot_required | default(false)}) }}"
+
+- name: Reiniciar servicios indicados en el plan
+  ansible.windows.win_service:
+    name: "{{ item }}"
+    state: restarted
+  async: 120
+  poll: 5
+  loop: "{{ remed_item.services | default([]) }}"

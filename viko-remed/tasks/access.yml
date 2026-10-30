@@ -1,0 +1,29 @@
+---
+# Reutiliza exactamente el cargador del assessment, sin duplicar datos ni descifrar en scripts.
+- name: Usar acceso cifrado ya implantado en el assessment
+  ansible.builtin.include_tasks: "{{ remed_recon_dir }}/tasks/vault_accesos.yml"
+  when: vuln_use_vault | default(false) | bool
+  no_log: true
+
+- name: Exigir acceso por contraseña en la plantilla Vault
+  ansible.builtin.assert:
+    that:
+      - _viko_access.mode == 'password'
+    fail_msg: 'El alias requiere la plantilla SSH Key con su credencial Machine.'
+  when: vuln_use_vault | default(false) | bool
+  no_log: true
+
+- name: Evitar contraseña de encuesta o inventario en la plantilla SSH Key
+  ansible.builtin.assert:
+    that:
+      - ansible_password | default('') | string | length == 0
+      - ansible_ssh_pass | default('') | string | length == 0
+    fail_msg: 'Use Machine con llave y desactive variables/encuestas de contraseña.'
+  when: not (vuln_use_vault | default(false) | bool)
+  no_log: true
+
+- name: Recalcular plataforma después de asignar acceso
+  ansible.builtin.set_fact:
+    _remed_windows: "{{ (ansible_connection | default('ssh')) in ['winrm', 'psrp'] or (ansible_shell_type | default('')) == 'powershell' }}"
+    _remed_result: "{{ _remed_result | combine({'address': ansible_host | default(inventory_hostname), 'customer': vuln_customer | default('SIN_ASIGNAR')}) }}"
+  no_log: true
