@@ -1,0 +1,13 @@
+---
+- name: Instalar versiones exactas SUSE
+  community.general.zypper:
+    name: "{{ _specs }}"
+    state: present
+    update_cache: true
+    disable_gpg_check: false
+    force: false
+    force_resolution: false
+  become: "{{ remed_linux_become | default(true) | bool }}"
+  register: _zypper
+  async: 600
+  poll: 5
