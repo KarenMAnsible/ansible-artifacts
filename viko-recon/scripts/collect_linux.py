@@ -304,7 +304,7 @@ class Collector:
             if len(cols) != 3:
                 continue
             name, version, arch = cols
-            if re.match(r'^(?:php(?:\d+(?:\.\d+)*)?-)?php(?:\d+(?:\.\d+)*)?(?:-(?:cli|fpm|cgi|common))?$', name) or re.match(r'^libapache2-mod-php[\d.]*$', name):
+            if re.match(r'^(?:php(?:\d+(?:\.\d+)*)?-)?php(?:\d+(?:\.\d+)*)?(?:-(?:cli|fpm|cgi|fastcgi|common|apache2))?$', name) or re.match(r'^(?:libapache2-mod-php|apache2-mod_php)[\d.]*$', name):
                 # Anchor after the epoch. A metapackage such as
                 # 2:101~+ubuntu24.04.1 must never become PHP 24.04.1.
                 m = re.match(r'(\d+\.\d+\.\d+)(?=$|[-+~.])', re.sub(r'^\d+:', '', version))
@@ -345,6 +345,272 @@ class Collector:
             'binary_patterns': list(patterns), 'cli_binaries_checked': len(seen),
             'runtime_web': 'pendiente_de_correlacion',
             'note': 'El inventario de paquetes/CLI no acredita ausencia de PHP en aplicaciones, módulos Apache o contenedores.'}
+
+    def php_runtime(self, services, processes):
+        """Disk configuration + observed processes. No requests, dumps or env."""
+        import gzip
+        import hashlib
+        import socket
+        self.php_web = {'status': 'correlacion_parcial', 'config': [], 'loaded_modules': [],
+                        'workers': [], 'errors': [], 'files_consulted': [],
+                        'limitations': ['Configuración en disco; no demuestra qué generación cargó cada worker.',
+                                         'Sin solicitudes HTTP, contenedores, chroots ni configuraciones externas no descubiertas.',
+                                         'No se prueba que una aplicación atendió peticiones ni exposición pública.']}
+        web = self.php_web
+        runtime_errors_start = self.error_count
+        def issue(path, reason):
+            if len(web['errors']) < 100:
+                web['errors'].append({'location': path, 'reason': reason})
+        def read(path, limit=262144):
+            if self.expired():
+                return None
+            try:
+                with open(path, 'rb') as f:
+                    data = f.read(limit + 1)
+                if len(data) > limit:
+                    issue(path, 'tamano_no_inspeccionado'); return None
+                return data
+            except OSError:
+                issue(path, 'no_legible'); return None
+        # Explicit allowlist: never return complete config lines or arguments.
+        roots = ['/etc/apache2/apache2.conf', '/etc/httpd/conf/httpd.conf', '/etc/nginx/nginx.conf'] + list(self.c.get('php_config_paths', []))
+        patterns = ['/etc/apache2/mods-enabled/*.load', '/etc/apache2/mods-enabled/*.conf',
+                    '/etc/apache2/sites-enabled/*', '/etc/apache2/conf-enabled/*',
+                    '/etc/httpd/conf.d/*.conf', '/etc/httpd/conf.modules.d/*.conf',
+                    '/etc/nginx/conf.d/*.conf', '/etc/nginx/sites-enabled/*',
+                    '/etc/php/*/fpm/php-fpm.conf', '/etc/php/*/fpm/pool.d/*.conf',
+                    '/etc/php-fpm.conf', '/etc/php-fpm.d/*.conf',
+                    '/etc/opt/remi/php*/php-fpm.conf', '/etc/opt/remi/php*/php-fpm.d/*.conf',
+                    '/opt/plesk/php/*/etc/php-fpm.conf', '/opt/plesk/php/*/etc/php-fpm.d/*.conf',
+                    '/usr/local/etc/php-fpm.conf', '/usr/local/etc/php-fpm.d/*.conf']
+        queue = [p for p in roots if os.path.isfile(p)]
+        for pattern in patterns:
+            queue.extend(sorted(glob.glob(pattern)))
+        seen = set()
+        def endpoint(value):
+            # Values only: Unix socket or IP/hostname:port. Variables unresolved.
+            m = re.search(r'(?:unix:)?(/[A-Za-z0-9_./@+-]+\.sock)', value)
+            if m: return m.group(1)
+            m = re.search(r'(?:fcgi://)?((?:[A-Za-z0-9_.-]+|\[[0-9A-Fa-f:]+\]):\d{1,5})', value)
+            return m.group(1) if m else ''
+        while queue and not self.expired():
+            path = queue.pop(0)
+            real = os.path.realpath(path)
+            if real in seen: continue
+            if len(seen) >= 160:
+                issue('config', 'limite_160_archivos'); break
+            seen.add(real)
+            if not os.path.isfile(real): continue
+            data = read(real)
+            if data is None: continue
+            web['files_consulted'].append({'path': path, 'sha256': hashlib.sha256(data).hexdigest()})
+            server = 'fpm' if 'fpm' in path else 'nginx' if '/nginx/' in path else 'apache'
+            pool = ''
+            for n, line in enumerate(data.decode('utf-8', 'replace').splitlines(), 1):
+                s = line.strip()
+                if not s or s.startswith(('#', ';')): continue
+                if server == 'fpm' and re.match(r'^\[[A-Za-z0-9_.-]+\]$', s): pool = s[1:-1]
+                inc = re.match(r'(?i)^(?:includeoptional|include)\s*(?:=|\s)\s*["\']?([^;"\'\s]+)', s)
+                if inc:
+                    value = inc.group(1)
+                    if '$' in value: issue(path, 'include_variable_no_resuelto')
+                    else:
+                        base = '/etc/nginx' if server == 'nginx' else '/etc/apache2' if '/apache2/' in path else '/etc/httpd' if server == 'apache' else os.path.dirname(path)
+                        target = value if os.path.isabs(value) else os.path.join(base, value)
+                        matches = sorted(glob.glob(target))
+                        if not matches and not s.lower().startswith('includeoptional'): issue(path, 'include_sin_coincidencia')
+                        queue.extend(matches)
+                directive = ''
+                value = ''
+                if server == 'fpm' and re.match(r'^listen\s*=', s):
+                    directive = 'listen'; value = endpoint(s.partition('=')[2])
+                    if not value:
+                        m = re.fullmatch(r'\s*(\d{1,5})\s*(?:;.*)?', s.partition('=')[2])
+                        if m: value = '0.0.0.0:' + m.group(1)
+                elif re.match(r'(?i)^LoadModule\s+php\S*\s+', s):
+                    directive = 'LoadModule'; m = re.search(r'([A-Za-z0-9_./+-]*libphp[^\s"\']*\.so)', s)
+                    value = m.group(1) if m else ''
+                elif re.match(r'(?i)^(SetHandler|ProxyPassMatch|fastcgi_pass)\s+', s):
+                    directive = s.split()[0]; value = endpoint(s)
+                    if not value and 'application/x-httpd-php' in s: value = 'application/x-httpd-php'
+                if directive:
+                    web['config'].append({'server': server, 'file': path, 'line': n,
+                                          'directive': directive, 'target': value or 'no_resuelto', 'pool': pool,
+                                          'state': 'configurada_en_disco'})
+        # Map loaded mod_php from /proc/maps, not apachectl output from a new process.
+        processed = set()
+        for proc in processes[:128]:
+            if self.expired(): break
+            name = proc.get('name', '')
+            if not re.search(r'php|apache|httpd', name, re.I): continue
+            pid = proc['pid']
+            try:
+                if os.readlink('/proc/{}/ns/mnt'.format(pid)) != os.readlink('/proc/self/ns/mnt'):
+                    issue('/proc/{}/ns/mnt'.format(pid), 'namespace_distinto_contenido_no_inspeccionado')
+                    continue
+            except OSError:
+                issue('/proc/{}/ns/mnt'.format(pid), 'namespace_no_verificado')
+                continue
+            exe = proc.get('executable', '')
+            if re.search(r'apache|httpd', name, re.I):
+                data = read('/proc/{}/maps'.format(pid), 1048576)
+                for line in (data or b'').decode('utf-8', 'replace').splitlines():
+                    m = re.search(r'(/[^\n]*libphp[^/\s]*\.so)(\s+\(deleted\))?$', line)
+                    if m and (pid, m.group(1)) not in processed:
+                        processed.add((pid, m.group(1)))
+                        web['loaded_modules'].append({'pid': pid, 'path': m.group(1), 'deleted': bool(m.group(2)),
+                                                      'state': 'mod_php_mapeado_en_proceso'})
+                        self.add('php', m.group(1), '', 'loaded_module', runtime_state='mod_php_mapeado', pid=pid,
+                                 loaded_generation='pendiente' if m.group(2) else 'no_verificada')
+            if re.search(r'php', name, re.I):
+                if not exe:
+                    issue('/proc/{}/exe'.format(pid), 'no_legible'); continue
+                deleted = exe.endswith(' (deleted)')
+                path = exe[:-10] if deleted else exe
+                web['workers'].append({'pid': pid, 'path': path, 'deleted': deleted, 'state': 'proceso_php_observado'})
+                if path not in processed:
+                    processed.add(path)
+                    version = ''
+                    if not deleted and self.c.get('run_php_version', True) and re.match(r'^php(?:[0-9.]*|[-]?fpm[0-9.]*|[-]?cgi[0-9.]*)$', os.path.basename(path)):
+                        text = self.command([path, '-n', '-v'])
+                        m = re.search(r'^PHP\s+(\S+)', text or '', re.M)
+                        version = m.group(1) if m else ''
+                    self.add('php', path, version, 'observed_executable', runtime_state='proceso_php_observado',
+                             pid=pid, loaded_generation='pendiente' if deleted else 'no_verificada')
+        # Unix listener ownership: proof that a PHP process holds the configured socket.
+        unix = read('/proc/net/unix', 1048576)
+        socket_paths = {}
+        for line in (unix or b'').decode('utf-8', 'replace').splitlines()[1:]:
+            cols = line.split()
+            if len(cols) >= 8 and cols[3] == '00010000': socket_paths[cols[6]] = cols[7]
+        # Also correlate TCP FastCGI listener inode with the observed PHP PID.
+        for table, ipv6 in (('/proc/net/tcp', False), ('/proc/net/tcp6', True)):
+            data = read(table, 1048576)
+            for line in (data or b'').decode('utf-8', 'replace').splitlines()[1:]:
+                cols = line.split()
+                if len(cols) < 10 or cols[3] != '0A': continue
+                try:
+                    raw_ip, port = cols[1].split(':')
+                    raw = bytes.fromhex(raw_ip)
+                    raw = b''.join(raw[i:i+4][::-1] for i in range(0,16,4)) if ipv6 else raw[::-1]
+                    address = socket.inet_ntop(socket.AF_INET6 if ipv6 else socket.AF_INET, raw)
+                    value = ('[' + address + ']' if ipv6 else address) + ':' + str(int(port,16))
+                    socket_paths[cols[9]] = value
+                except (ValueError, OSError): continue
+        listeners = {}
+        for worker in web['workers']:
+            fdpath = '/proc/{}/fd'.format(worker['pid'])
+            try:
+                for fd in os.listdir(fdpath)[:4096]:
+                    if self.expired(): break
+                    try: link = os.readlink(fdpath + '/' + fd)
+                    except OSError: continue
+                    m = re.fullmatch(r'socket:\[(\d+)\]', link)
+                    if m and m.group(1) in socket_paths:
+                        listeners.setdefault(socket_paths[m.group(1)], []).append(worker['pid'])
+            except OSError: issue(fdpath, 'socket_owner_no_legible')
+        for edge in web['config']:
+            target = edge['target'].replace('localhost:', '127.0.0.1:')
+            matched = list(listeners.get(target, []))
+            if re.fullmatch(r'(?:127\.0\.0\.1|[0-9.]+):[0-9]+', target):
+                matched += listeners.get('0.0.0.0:' + target.rsplit(':',1)[1], [])
+            if edge['server'] in ('apache', 'nginx') and matched:
+                edge['worker_pids'] = sorted(set(matched))
+                edge['state'] = 'handler_configurado_y_socket_php_observado'
+        if web['loaded_modules']:
+            web['status'] = 'mod_php_observado'
+        elif any(e.get('worker_pids') for e in web['config']):
+            web['status'] = 'handler_y_worker_observados'
+        elif web['workers']:
+            web['status'] = 'worker_observado_ruta_web_pendiente'
+        elif web['config']:
+            web['status'] = 'configuracion_sin_worker_correlacionado'
+        else:
+            web['status'] = 'sin_runtime_detectado_en_fuentes' if not web['errors'] else 'pendiente_no_evaluado'
+        # Provenance and local changelog: candidates only; never automatically a fixed verdict.
+        packages = [o for o in self.observations if o.get('version_source') == 'package_db']
+        for o in list(self.observations):
+            if self.expired(): break
+            if o.get('component') != 'php' or o.get('path', '').startswith('package:'): continue
+            p = o.get('path', '')
+            if not p.startswith('/'): continue
+            if shutil.which('dpkg-query'):
+                own = self.command(['dpkg-query', '-S', p])
+                for line in (own or '').splitlines():
+                    owner = line.split(': ', 1)[0].split(':')[0]
+                    found = next((x for x in packages if x.get('package') == owner), None)
+                    if found:
+                        for k in ('package', 'package_version', 'package_manager', 'architecture'):
+                            o[k] = found.get(k, '')
+                        if not o.get('version'): o['version'] = found.get('version', ''); o['version_source'] = 'package_owned_file'
+                        break
+            elif shutil.which('rpm'):
+                text = self.command(['rpm', '-qf', '--qf', '%{NAME}\t%{EPOCHNUM}:%{VERSION}-%{RELEASE}\t%{ARCH}', p])
+                cols = (text or '').strip().split('\t')
+                if len(cols) == 3:
+                    o.update(package=cols[0], package_version=cols[1], architecture=cols[2], package_manager='rpm')
+                    if not o.get('version'):
+                        m = re.search(r'(\d+\.\d+\.\d+)', cols[1]); o['version'] = m.group(1) if m else ''
+                        o['version_source'] = 'package_owned_file'
+        cache = {}
+        for o in self.observations:
+            if self.expired(): break
+            package = o.get('package', '')
+            if not package: continue
+            if package not in cache:
+                meta = {'provider': 'no_confirmado', 'changelog': [], 'origin_hosts': []}
+                if o.get('package_manager') == 'dpkg':
+                    text = self.command(['dpkg-query', '-W', '-f=${Maintainer}\t${source:Package}\t${source:Version}', package])
+                    cols = (text or '').split('\t')
+                    # Email and arbitrary maintainer strings are not exported.
+                    if len(cols) == 3:
+                        meta['source_package'] = re.sub(r'[^A-Za-z0-9.+:-]', '', cols[1])
+                        meta['source_version'] = re.sub(r'[^A-Za-z0-9.+:~_-]', '', cols[2])
+                        meta['provider'] = 'ubuntu_declarado' if 'ubuntu' in cols[0].lower() else 'tercero_declarado'
+                    policy = self.command(['apt-cache', 'policy', package], optional=True)
+                    # Export hostnames only, never repository URLs/userinfo/query tokens.
+                    from urllib.parse import urlsplit
+                    in_version = False
+                    for line in (policy or '').splitlines():
+                        vm = re.match(r'^\s*(?:\*\*\*\s+)?(\S+)\s+\d+\s*$', line)
+                        if vm: in_version = vm.group(1) == o.get('package_version'); continue
+                        if in_version:
+                            for url in re.findall(r'https?://\S+', line):
+                                try: host = urlsplit(url).hostname or ''
+                                except ValueError: host = ''
+                                if host and host not in meta['origin_hosts']: meta['origin_hosts'].append(host)
+                    path = '/usr/share/doc/' + package + '/changelog.Debian.gz'
+                    if os.path.isfile(path):
+                        try:
+                            with gzip.open(path, 'rb') as f: data = f.read(1048577)
+                            section = ''
+                            for line in data[:1048576].decode('utf-8', 'replace').splitlines():
+                                h = re.match(r'^\S+\s+\(([^)]+)\)', line)
+                                if h: section = h.group(1)
+                                cves = re.findall(r'CVE-2026-10961[89]', line)
+                                if cves:
+                                    meta['changelog'].append({'file': path, 'section_version': section, 'cves': sorted(set(cves)),
+                                                             'state': 'mencion_local_no_equivale_a_verificacion'})
+                                if len(meta['changelog']) >= 8: break
+                        except (OSError, EOFError): issue(path, 'changelog_no_legible')
+                else:
+                    text = self.command(['rpm', '-q', '--qf', '%{VENDOR}\t%{SOURCERPM}', package])
+                    cols = (text or '').split('\t')
+                    if len(cols) == 2:
+                        meta['provider'] = next((v for v in ('Red Hat', 'SUSE', 'Remi', 'Oracle', 'Rocky', 'AlmaLinux') if v.lower() in cols[0].lower()), 'tercero_declarado')
+                        meta['source_package'] = re.sub(r'[^A-Za-z0-9.+:~_-]', '', cols[1])
+                    text = self.command(['rpm', '-q', '--changelog', package])
+                    meta['changelog'] = [{'cves': sorted(set(re.findall(r'CVE-2026-10961[89]', text or ''))),
+                                          'state': 'mencion_local_no_equivale_a_verificacion'}]
+                cache[package] = meta
+            o['provenance'] = cache[package]
+            o.setdefault('runtime_state', 'instalado_uso_no_confirmado')
+        for o in self.observations:
+            if o.get('component') == 'php': o.setdefault('runtime_state', 'instalado_uso_no_confirmado')
+        self.php_inventory['runtime_web'] = web['status']
+        self.php_inventory['sources'].extend(['configuración web permitida', 'procesos y módulos observados', 'propietario de archivos y changelog local'])
+        if web['errors'] or self.error_count > runtime_errors_start or self.expired(): self.php_inventory['status'] = 'parcial'
+        self.php_inventory['note'] = 'Fuentes acotadas; configuración en disco no prueba atención de peticiones. Contenedores y rutas no descubiertas pendientes.'
 
     def context(self):
         services = []
@@ -411,6 +677,8 @@ class Collector:
                 except ValueError:
                     pass
             services, processes, trend, containers = self.context()
+            if 'php' in self.c.get('checks', []) and self.php_inventory:
+                self.php_runtime(services, processes)
             if not self.c.get('php_inventory_only', False):
                 self.walk()
         except ScanDeadline:
@@ -426,12 +694,13 @@ class Collector:
         for family in self.c.get('checks', []):
             if family == 'php':
                 families[family] = self.php_inventory or {'status': 'no_evaluado', 'runtime_web': 'pendiente_de_correlacion'}
+                if self.budget_exhausted: families[family]['status'] = 'parcial'
             else:
                 families[family] = {'status': file_search, 'sources': ['archivos en raíces configuradas']}
-        return {'schema_version': 1, 'collector_version': '1.5-piloto', 'status': 'recolectado', 'platform': 'linux', 'system': system,
+        return {'schema_version': 1, 'collector_version': '1.6-evidencia', 'status': 'recolectado', 'platform': 'linux', 'system': system,
                 'timestamp_utc': datetime.datetime.now(datetime.timezone.utc).isoformat(),
                 'observations': self.observations, 'services': services, 'processes': processes,
-                'trend_local': trend, 'containers': containers,
+                'trend_local': trend, 'containers': containers, 'php_web': getattr(self, 'php_web', {}),
                 'coverage': {'file_search': file_search, 'families': families,
                              'roots_requested': [] if self.c.get('php_inventory_only', False) else self.c.get('linux_roots', []), 'roots_completed': self.completed_roots,
                              'roots_absent': self.missing_roots, 'excluded': self.c.get('linux_excludes', []),
@@ -441,7 +710,7 @@ class Collector:
                              'limits': self.c,
                              'limitations': ['Solo rutas configuradas; no prueba ausencia global.',
                                              'Contenedores: solo inventario de ejecución; imágenes y contenido interno no inspeccionados.',
-                                             'No correlaciona automáticamente biblioteca con aplicación en ejecución ni exposición pública.',
+                                             'Correlación por evidencia de configuración/proceso; sin prueba HTTP ni exposición pública.',
                                              'No evalúa condiciones de explotación ni configuraciones de Struts/PHP.']}}
 
 

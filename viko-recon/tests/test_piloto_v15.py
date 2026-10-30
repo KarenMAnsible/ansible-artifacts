@@ -35,7 +35,7 @@ class PilotTests(unittest.TestCase):
             with patch.object(collect.glob, 'glob', return_value=[]), patch.object(collect.shutil, 'which', return_value=None):
                 raw = c.run()
             self.assertEqual(raw['coverage']['file_search'], 'no_solicitado')
-            self.assertEqual(raw['coverage']['families']['php']['runtime_web'], 'pendiente_de_correlacion')
+            self.assertIn(raw['coverage']['families']['php']['runtime_web'], ('sin_runtime_detectado_en_fuentes', 'pendiente_no_evaluado'))
             # No package manager is a real missing source, not a clean inventory.
             self.assertEqual(raw['coverage']['families']['php']['status'], 'parcial')
 

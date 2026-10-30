@@ -1,0 +1,26 @@
+---
+# Metadata only. Never emit credential values or copy the access dictionary to reports.
+- name: Inicializar cruce de inventario con registros disponibles
+  ansible.builtin.set_fact:
+    _vuln_audit: []
+    _vuln_audit_access: "{{ (hostvars[ansible_play_hosts_all[0]]._viko_access_file | default({})).get('viko_assessment_access', {}) }}"
+  no_log: true
+
+- name: Cruzar aliases AAP y referencias preparadas sin conectar a otros equipos
+  ansible.builtin.set_fact:
+    _vuln_audit: >-
+      {{ _vuln_audit + [{
+        'host': item,
+        'in_aap': item in (groups['all'] | default([])),
+        'in_access_records': item in _vuln_audit_access,
+        'address': (hostvars[item].ansible_host | default(item)) if item in (groups['all'] | default([])) else '',
+        'customer': (_vuln_audit_access.get(item, {})).get('customer', ''),
+        'inventory_port': (hostvars[item].ansible_port | default('no_explicito')) if item in (groups['all'] | default([])) else '',
+        'prepared_port': (_vuln_audit_access.get(item, {})).get('port', 'no_explicito'),
+        'mode': (_vuln_audit_access.get(item, {})).get('mode', 'no_consultado'),
+        'prepared_status': (_vuln_audit_access.get(item, {})).get('status', 'sin_registro' if _vuln_audit_access | length > 0 else 'vault_no_cargado'),
+        'selected_this_job': item in ansible_play_hosts_all,
+        'note': 'Referencia de llave no confirma credencial Machine asignada; listo no confirma conectividad.'
+      }] }}
+  loop: "{{ ((groups['all'] | default([])) + (_vuln_audit_access.keys() | list)) | unique | difference(['localhost', '127.0.0.1', '::1']) | sort }}"
+  no_log: true

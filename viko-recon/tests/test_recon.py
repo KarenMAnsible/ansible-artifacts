@@ -66,10 +66,10 @@ class RuleTests(unittest.TestCase):
 
     def test_vendor_exact_package_evidence(self):
         rule = self.rule('CVE-2026-109618')
-        o = dict(component='php', version='8.1.33', version_source='package_db', package='php-fpm', package_version='0:8.1.33-9.vendor')
+        o = dict(component='php', version='8.1.33', version_source='package_db', package='php-fpm', package_version='0:8.1.33-9.vendor', provenance={'provider': 'SUSE'})
         self.assertEqual(report.classify(o, rule, [])[0], 'requiere_validacion_proveedor')
         e = dict(component='php', package='php-fpm', installed_version=o['package_version'],
-                 cves=[rule['cve']], status='fixed', advisory='https://example.test/vendor/errata')
+                 cves=[rule['cve']], status='fixed', advisory='https://www.suse.com/support/update/announcement/example')
         self.assertEqual(report.classify(o, rule, [e])[0], 'corregido_segun_evidencia_proveedor')
         e['installed_version'] += 'X'
         self.assertEqual(report.classify(o, rule, [e])[0], 'requiere_validacion_proveedor')
@@ -160,7 +160,7 @@ class ReportTests(unittest.TestCase):
             encoded = report.write_reports(r, tmp)
             import base64
             with zipfile.ZipFile(io.BytesIO(base64.b64decode(encoded))) as z:
-                self.assertEqual(len(z.namelist()), 6)
+                self.assertEqual(len(z.namelist()), 7)
                 self.assertIn('resultados.txt', z.namelist())
                 self.assertEqual(json.loads(z.read('reporte.json'))['summary']['hosts'], 1)
             h = (Path(tmp) / 'reporte.html').read_text()

@@ -77,6 +77,49 @@ def in_range(v, spec):
     return True
 
 
+def trusted_advisory(url, provenance):
+    from urllib.parse import urlsplit
+    try:
+        parsed = urlsplit(str(url))
+        host = parsed.hostname or ''
+    except ValueError:
+        return False
+    if parsed.scheme != 'https' or parsed.username or parsed.password:
+        return False
+    origins = provenance.get('origin_hosts', [])
+    official_ubuntu = any(h in ('security.ubuntu.com', 'archive.ubuntu.com', 'ports.ubuntu.com') or h.endswith('.archive.ubuntu.com') for h in origins)
+    if host == 'ubuntu.com': return official_ubuntu and provenance.get('provider') == 'ubuntu_declarado'
+    providers = {'access.redhat.com': 'Red Hat', 'www.suse.com': 'SUSE', 'linux.oracle.com': 'Oracle'}
+    return host in providers and provenance.get('provider') == providers[host]
+
+
+def official_package_match(observation, rule, system):
+    """Narrow positive allowlist checked against USN-8948-1 on 2026-10-29.
+    Exact revisions only: no reuse of Ubuntu thresholds for PPA/third-party builds.
+    Verifies package metadata against the bulletin, not memory/artifact integrity.
+    """
+    if rule.get('family') != 'php' or system.get('ID') != 'ubuntu': return None
+    release = system.get('VERSION_ID')
+    matrix = {'22.04': ('8.1', '8.1.2-1ubuntu2.28'),
+              '24.04': ('8.3', '8.3.6-0ubuntu0.24.04.13'),
+              '26.04': ('8.5', '8.5.4-0ubuntu1.5'),
+              '26.10': ('8.5', '8.5.9-0ubuntu2.1')}
+    if release not in matrix: return None
+    branch, fixed = matrix[release]
+    package = observation.get('package', '')
+    allowed = ['php' + branch + '-' + k for k in ('cli', 'cgi', 'fpm')] + ['libapache2-mod-php' + branch]
+    provenance = observation.get('provenance') or {}
+    source = 'https://ubuntu.com/security/notices/USN-8948-1'
+    if (package in allowed and observation.get('package_version') == fixed
+            and provenance.get('source_package') == 'php' + branch
+            and provenance.get('source_version') == fixed
+            and trusted_advisory(source, provenance)):
+        return {'component':'php', 'package':package, 'installed_version':fixed,
+                'cves':[rule['cve']], 'status':'fixed', 'advisory':source,
+                'verification':'coincidencia_exacta_aviso_metadatos_origen_cache; memoria_no_verificada'}
+    return None
+
+
 def vendor_match(observation, rule, evidence):
     for e in evidence:
         if (e.get('component') == observation.get('component')
@@ -84,7 +127,7 @@ def vendor_match(observation, rule, evidence):
             and e.get('installed_version') == observation.get('package_version')
             and rule['cve'] in e.get('cves', [])
             and e.get('status') == 'fixed'
-            and str(e.get('advisory', '')).startswith('https://')):
+            and trusted_advisory(e.get('advisory', ''), observation.get('provenance', {}))):
             return e
     return None
 
@@ -147,6 +190,7 @@ def build_report(payload):
                   diagnostics=raw.get('diagnostics', {}), collector_version=raw.get('collector_version', 'anterior / no registrada'),
                   trend_local=raw.get('trend_local', {}), services=raw.get('services', []),
                   processes=raw.get('processes', []), containers=raw.get('containers', []),
+                  php_web=raw.get('php_web', {}), service_coverage=raw.get('service_coverage', {}),
                   family_status={}, timestamp_utc=raw.get('timestamp_utc', ''))
         obs = raw.get('observations', [])
         for rule in rules:
@@ -168,7 +212,9 @@ def build_report(payload):
                 if state:
                     status, note = state, 'Ausencia de hallazgo no prueba ausencia global; revisar cobertura y contenido no inspeccionado.'
                 else:
-                    status, note = classify(o, rule, host.get('vendor_evidence', []))
+                    verified = official_package_match(o, rule, hs['system'])
+                    evidence = list(host.get('vendor_evidence', [])) + ([verified] if verified else [])
+                    status, note = classify(o, rule, evidence)
                 finding = {k: hs[k] for k in ('host', 'address', 'customer', 'security_coverage')}
                 finding.update(family=rule['family'], cve=rule['cve'], severity=rule['severity'],
                                component=o['component'], version=o.get('version', ''), path=o.get('path', ''),
@@ -176,6 +222,7 @@ def build_report(payload):
                                package_version=o.get('package_version', ''), jndi_lookup=o.get('jndi_lookup'),
                                status=status, note=note, action=rule['action'], source=rule['source'],
                                runtime_exposure='no_evaluada', application_owner='por_identificar')
+                finding.update({k: o.get(k, '') for k in ('runtime_state', 'loaded_generation', 'sha256', 'provenance')})
                 identity = '\0'.join(str(finding.get(k, '')) for k in ('host', 'cve', 'component', 'path', 'version', 'package_version', 'version_source'))
                 finding['id'] = hashlib.sha256(identity.encode()).hexdigest()[:20]
                 findings.append(finding)
@@ -205,14 +252,96 @@ def build_report(payload):
                                  or any(c.get('running') or c.get('status') == 'no_evaluado' for c in hs['containers']))
         hosts.append(hs)
     counts = dict(collections.Counter(f['status'] for f in findings if f.get('cve')))
-    return {'schema_version': 1, 'generated_utc': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    return enrich_php({'schema_version': 2, 'generated_utc': datetime.datetime.now(datetime.timezone.utc).isoformat(),
             'rules_reviewed_on': RULESET['reviewed_on'], 'checks': checks,
+            'inventory_audit': payload.get('inventory_audit', []), 'access_records_count': payload.get('access_records_count'),
             'scope_note': RULESET['scope_note'], 'summary': {'hosts': len(hosts),
                 'hosts_not_evaluated': sum(h['collection_status'] != 'recolectado' for h in hosts),
                 'hosts_partial': sum(h['collection_status'] == 'recolectado' and incomplete_coverage(h['coverage'], h['coverage'].get('limits', {}).get('checks', checks)) for h in hosts),
                 'hosts_requiring_review': sum(h['review_required'] for h in hosts),
                 'cve_observation_rows': sum(bool(f.get('cve')) for f in findings), 'statuses': counts},
-            'hosts': hosts, 'findings': findings}
+            'hosts': hosts, 'findings': findings})
+
+
+
+def php_result(finding, coverage=None):
+    status = finding.get('status', '')
+    if status == 'corregido_segun_evidencia_proveedor':
+        if finding.get('runtime_state') in ('mod_php_mapeado', 'proceso_php_observado') and finding.get('loaded_generation') != 'verificada':
+            return 'pendiente_no_evaluado'
+        return 'correccion_verificada'
+    if status in ('potencialmente_afectado', 'requiere_validacion_proveedor'):
+        return 'afectacion_potencial'
+    if status in ('no_detectado_en_fuentes_consultadas', 'no_detectado_en_rutas_revisadas'):
+        return 'sin_hallazgo_en_alcance_consultado'
+    # Numeric >= upstream minimum is useful evidence, but not package provenance,
+    # artifact integrity, or proof that the corrected binary is loaded.
+    return 'pendiente_no_evaluado'
+
+
+def enrich_php(report):
+    for host in report['hosts']:
+        own = [f for f in report['findings'] if f['host'] == host['host'] and f['family'] == 'php']
+        web = host.get('php_web', {})
+        for finding in own:
+            finding['runtime_observed'] = finding.get('runtime_state', 'uso_no_confirmado')
+            finding['runtime_web'] = web.get('status', host['coverage'].get('families', {}).get('php', {}).get('runtime_web', 'pendiente_no_evaluado'))
+            finding['coverage_php'] = family_coverage(host['coverage'], 'php')
+            finding['result'] = php_result(finding)
+            finding['evidence'] = json.dumps({'version_source': finding.get('version_source'),
+                'provenance': finding.get('provenance', {}), 'sha256': finding.get('sha256', ''),
+                'loaded_generation': finding.get('loaded_generation', 'no_verificada')}, ensure_ascii=False, sort_keys=True)
+            if finding['status'] == 'fuera_rango_version':
+                finding['action'] = 'Versión observada supera el mínimo upstream de este CVE. Verificar procedencia del artefacto y generación cargada; no se certifica un backport.'
+            if finding['result'] == 'sin_hallazgo_en_alcance_consultado':
+                finding['action'] = 'Conservar evidencia del alcance. Revisar contenedores, rutas alternativas y fuentes pendientes; no acredita ausencia global.'
+        states = [f['result'] for f in own]
+        host['php_result'] = next((s for s in ('afectacion_potencial', 'pendiente_no_evaluado', 'sin_hallazgo_en_alcance_consultado', 'correccion_verificada') if s in states), 'pendiente_no_evaluado')
+        host['php_versions'] = ', '.join(sorted({f['version'] for f in own if f.get('version')}))
+        host['runtime_web'] = web.get('status', host['coverage'].get('families', {}).get('php', {}).get('runtime_web', 'pendiente_no_evaluado'))
+        host['coverage_php'] = family_coverage(host['coverage'], 'php')
+        if host['coverage_php'] not in ('completado_en_fuentes', 'completado_en_rutas') and host['php_result'] != 'afectacion_potencial':
+            host['php_result'] = 'pendiente_no_evaluado'
+        host['next_action'] = ' | '.join(sorted({f.get('action', '') for f in own}))
+        host['evidence'] = json.dumps({'php_web': web, 'service_coverage': host.get('service_coverage', {})}, ensure_ascii=False, sort_keys=True)
+        host['review_required'] = host['review_required'] or host['php_result'] == 'pendiente_no_evaluado' or host['runtime_web'] not in ('mod_php_observado', 'handler_y_worker_observados', 'sin_runtime_detectado_en_fuentes')
+    report['summary']['hosts_requiring_review'] = sum(h['review_required'] for h in report['hosts'])
+    report['summary']['php_results'] = dict(collections.Counter(h['php_result'] for h in report['hosts']))
+    report['summary']['access_records_consulted'] = report.get('access_records_count')
+    report['summary']['access_records_expected'] = 201
+    report['summary']['access_record_count_matches_expected'] = report.get('access_records_count') == 201
+    report['summary']['inventory_audit_rows'] = len(report.get('inventory_audit', []))
+    audit = report.get('inventory_audit', [])
+    for row in audit:
+        row['port_mismatch'] = str(row.get('inventory_port')) != str(row.get('prepared_port')) and 'no_explicito' not in (row.get('inventory_port'), row.get('prepared_port')) and row.get('in_aap', False) and row.get('in_access_records', False)
+        row['audit_result'] = ('registro_sin_alias_aap' if not row.get('in_aap') else
+            'no_evaluado_vault_no_cargado' if row.get('prepared_status') == 'vault_no_cargado' else
+            'sin_acceso_preparado' if not row.get('in_access_records') else
+            'puerto_discrepante' if row['port_mismatch'] else
+            'pendiente' if row.get('prepared_status') != 'listo' else
+            'referencia_llave_validar_machine' if row.get('mode') == 'key' else 'preparado_sin_prueba_global')
+    report['summary']['inventory_audit_statuses'] = dict(collections.Counter(r['audit_result'] for r in audit))
+    report['summary']['access_port_1024_records'] = sum(str(r.get('prepared_port')) == '1024' for r in audit)
+    return report
+
+
+def render_php_evidence(report):
+    parts = []
+    for host in report['hosts']:
+        parts += ['', 'EVIDENCIA PHP 1.6 | ' + str(host['host']), 'Resultado: ' + host.get('php_result', 'pendiente_no_evaluado'),
+                  'Runtime observado: ' + host.get('runtime_web', 'pendiente_no_evaluado'),
+                  'Cobertura PHP: ' + host.get('coverage_php', 'no_evaluado'),
+                  'Servicios auxiliares: ' + json.dumps(host.get('service_coverage', {}), ensure_ascii=False)]
+        parts.append('Configuración, módulos, workers y omisiones (sin argumentos ni variables de entorno):')
+        parts.append(json.dumps(host.get('php_web', {}), ensure_ascii=False, indent=2))
+        for finding in report['findings']:
+            if finding['host'] == host['host'] and finding['family'] == 'php':
+                parts += ['  {} | {} | {}'.format(finding.get('cve'), finding.get('path'), finding.get('result')),
+                          '    Estado de uso: ' + finding.get('runtime_observed', 'uso_no_confirmado'),
+                          '    Evidencia: ' + finding.get('evidence', ''), '    Siguiente acción: ' + finding.get('action', '')]
+        parts += ['Límite: la corrección de un paquete en disco no demuestra renovación de procesos ni una petición atendida.',
+                  'Límite: contenedores, volúmenes y configuraciones no descubiertas quedan pendientes expresamente.']
+    return '\r\n'.join(parts)
 
 
 def csv_safe(value):
@@ -263,6 +392,7 @@ def render_text(report):
         'Fecha y hora del informe (CDMX): ' + mexico_datetime(report['generated_utc']),
         'Generado (UTC): ' + clean(report['generated_utc']),
         'Reglas revisadas: ' + clean(report['rules_reviewed_on']),
+        'Reglas PHP verificadas: ' + clean(RULESET.get('php_reviewed_on', report['rules_reviewed_on'])),
         'Familias solicitadas: ' + ', '.join(report['checks']),
         '', 'RESUMEN GENERAL',
         'Servidores incluidos: ' + str(summary['hosts']),
@@ -365,7 +495,7 @@ def render_text(report):
         for limitation in coverage.get('limitations', []):
             lines.append('Límite de cobertura: ' + clean(limitation))
     # BOM + CRLF for straightforward opening in Windows Notepad.
-    return ('\ufeff' + '\r\n'.join(lines) + '\r\n').encode('utf-8')
+    return ('\ufeff' + '\r\n'.join(lines) + '\r\n' + render_php_evidence(report) + '\r\n').encode('utf-8')
 
 
 def per_server_texts(report):
@@ -448,9 +578,10 @@ def write_reports(report, out, txt_dir=''):
     files = {
         'resultados.txt': render_text(report),
         'reporte.json': json.dumps(report, ensure_ascii=False, indent=2).encode('utf-8'),
-        'resumen.csv': csv_bytes(hosts, ['customer', 'host', 'address', 'platform', 'security_coverage', 'collection_status', 'coverage_status', 'coverage_errors', 'observations_count', 'php', 'log4j', 'struts', 'review_required']),
-        'hallazgos.csv': csv_bytes(report['findings'], ['customer', 'host', 'address', 'security_coverage', 'family', 'cve', 'severity', 'component', 'version', 'version_source', 'package', 'package_version', 'path', 'jndi_lookup', 'status', 'note', 'action', 'source']),
-        'reporte.html': render_html(report)
+        'resumen.csv': csv_bytes(hosts, ['customer', 'host', 'address', 'platform', 'security_coverage', 'collection_status', 'coverage_status', 'coverage_errors', 'observations_count', 'php', 'php_result', 'php_versions', 'runtime_web', 'coverage_php', 'evidence', 'next_action', 'log4j', 'struts', 'review_required']),
+        'hallazgos.csv': csv_bytes(report['findings'], ['customer', 'host', 'address', 'security_coverage', 'family', 'cve', 'severity', 'component', 'version', 'version_source', 'package', 'package_version', 'path', 'jndi_lookup', 'status', 'result', 'runtime_observed', 'runtime_web', 'coverage_php', 'evidence', 'note', 'action', 'source']),
+        'reporte.html': render_html(report),
+        'cruce_inventario.csv': csv_bytes(report.get('inventory_audit', []), ['host', 'customer', 'address', 'in_aap', 'in_access_records', 'inventory_port', 'prepared_port', 'mode', 'prepared_status', 'selected_this_job', 'port_mismatch', 'audit_result', 'note'])
     }
     files.update(per_server_texts(report))
     for name, data in files.items():
@@ -499,6 +630,10 @@ def main():
                 if i.file_size > 100 * 1024 * 1024:
                     p.error('Archivo descomprimido excede límite')
                 (out / name).write_bytes(z.read(i))
+            if 'cruce_inventario.csv' in z.namelist():
+                info = z.getinfo('cruce_inventario.csv')
+                if info.file_size > 100 * 1024 * 1024: p.error('Cruce excede límite')
+                (out / 'cruce_inventario.csv').write_bytes(z.read(info))
             if 'resultados.txt' in z.namelist():
                 i = z.getinfo('resultados.txt')
                 if i.file_size > 100 * 1024 * 1024:

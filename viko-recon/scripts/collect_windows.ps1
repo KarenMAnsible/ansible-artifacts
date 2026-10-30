@@ -205,13 +205,145 @@ function Invoke-Bounded([string]$Exe,[string]$Arguments) {
         return $text
     } catch {Add-Problem $Exe 'error_consulta'; return $null} finally {$p.Dispose()}
 }
+# VIKO PHP evidence 1.6: isolated queries share the existing global deadline.
+function Invoke-JsonProbe([string]$Body) {
+    $enc=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes("`$ErrorActionPreference='Stop'; "+$Body))
+    $text=Invoke-Bounded "$PSHOME\powershell.exe" ("-NoProfile -NonInteractive -EncodedCommand "+$enc)
+    if ($null -eq $text) {return $null}
+    try {return ($text | ConvertFrom-Json -ErrorAction Stop)} catch {return $null}
+}
+function Get-ServicesBounded {
+    $old=$config.command_timeout
+    $config.command_timeout=[Math]::Min(3,[int]$old)
+    try {
+        foreach ($method in @('scm','cim','wmi')) {
+            if (Test-Expired) {break}
+            $body=switch ($method) {
+                'scm' { '@{items=@(Get-Service -ErrorAction Stop | Where-Object {$_.Name -match "php|apache|httpd|nginx|tomcat|instana|ds_agent|trend|cloudreset|W3SVC|WAS"} | ForEach-Object {@{name=$_.Name; state=$_.Status.ToString(); source="ServiceController"}})} | ConvertTo-Json -Depth 5 -Compress' }
+                'cim' { '@{items=@(Get-CimInstance Win32_Service -OperationTimeoutSec 1 -ErrorAction Stop | Where-Object {$_.Name -match "php|apache|httpd|nginx|tomcat|instana|ds_agent|trend|cloudreset|W3SVC|WAS"} | ForEach-Object {@{name=$_.Name; state=$_.State; source="CIM"}})} | ConvertTo-Json -Depth 5 -Compress' }
+                'wmi' { '@{items=@(Get-WmiObject Win32_Service -ErrorAction Stop | Where-Object {$_.Name -match "php|apache|httpd|nginx|tomcat|instana|ds_agent|trend|cloudreset|W3SVC|WAS"} | ForEach-Object {@{name=$_.Name; state=$_.State; source="WMI"}})} | ConvertTo-Json -Depth 5 -Compress' }
+            }
+            $answer=Invoke-JsonProbe $body
+            if ($null -ne $answer -and $null -ne $answer.items) {
+                $script:ServiceCoverage=@{status='consultado'; method=$method}
+                return @($answer.items)
+            }
+        }
+        $script:ServiceCoverage=@{status='no_evaluado'; method='scm_cim_wmi'}
+        Add-Problem 'servicios_auxiliares' 'consultas_agotadas_o_timeout'
+        return @()
+    } finally {$config.command_timeout=$old}
+}
+function Get-WebRuntimeBounded {
+    # Only approved attributes and extracted paths are returned, never XML/config dumps.
+    $body=@'
+$ErrorActionPreference='Stop'
+$answer=@{processes=@(); config=@(); binaries=@(); errors=@(); files_consulted=@(); status='correlacion_parcial'}
+$paths=New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+try {
+    $answer.processes=@(Get-Process -ErrorAction Stop | Where-Object {$_.ProcessName -match 'php|apache|httpd|nginx|w3wp|tomcat|java|instana|ds_agent|trend|cloudreset'} | ForEach-Object {
+        $exe=''; try {$exe=$_.Path} catch {}
+        @{name=$_.ProcessName; pid=$_.Id; executable=$exe}
+    })
+} catch {$answer.errors+=@{location='procesos_php_web'; reason='consulta_no_disponible'}}
+$apphost=Join-Path $env:windir 'System32\inetsrv\config\applicationHost.config'
+if (Test-Path -LiteralPath $apphost) {
+    try {
+        Add-Type -Path (Join-Path $env:windir 'System32\inetsrv\Microsoft.Web.Administration.dll')
+        $sm=New-Object Microsoft.Web.Administration.ServerManager
+        try {
+            $count=0
+            foreach ($site in $sm.Sites) {
+                foreach ($app in $site.Applications) {
+                    if (++$count -gt 128) {throw 'ApplicationLimit'}
+                    try {
+                        $wc=$sm.GetWebConfiguration($site.Name,$app.Path)
+                        foreach ($h in $wc.GetSection('system.webServer/handlers').GetCollection()) {
+                            $processor=[Environment]::ExpandEnvironmentVariables([string]$h.GetAttributeValue('scriptProcessor'))
+                            $exe=($processor -split '\|',2)[0].Trim('"')
+                            if ($exe -match '(?i)^[A-Z]:\\[^\r\n]*\\php-cgi\.exe$') {
+                                [void]$paths.Add($exe)
+                                $answer.config+=@{server='iis'; file='effective_handlers'; site=$site.Name; application=$app.Path; target=$exe; directive='FastCgiModule'; state='handler_configurado'; site_state=$site.State.ToString()}
+                            }
+                        }
+                    } catch {$answer.errors+=@{location='iis_handlers'; reason='aplicacion_no_legible'}}
+                }
+            }
+        } finally {$sm.Dispose()}
+    } catch {$answer.errors+=@{location='iis'; reason='consulta_efectiva_no_disponible'}}
+}
+$queue=New-Object 'System.Collections.Generic.Queue[string]'
+foreach ($proc in $answer.processes) {
+    if ($proc.executable -and $proc.name -match '^php') {[void]$paths.Add($proc.executable)}
+    if ($proc.executable -and $proc.name -match '^(httpd|apache|nginx)') {
+        $dir=Split-Path -Parent $proc.executable
+        foreach ($p in @((Join-Path $dir 'conf\nginx.conf'),(Join-Path $dir 'conf\httpd.conf'),(Join-Path (Split-Path -Parent $dir) 'conf\httpd.conf'))) {
+            if (Test-Path -LiteralPath $p) {$queue.Enqueue($p)}
+        }
+    }
+}
+foreach ($p in @('C:\nginx\conf\nginx.conf','C:\Apache24\conf\httpd.conf','C:\xampp\apache\conf\httpd.conf','C:\PHP\php.exe')) {
+    if (Test-Path -LiteralPath $p) {if ($p -match '\.exe$') {[void]$paths.Add($p)} else {$queue.Enqueue($p)}}
+}
+$seen=New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+while ($queue.Count -gt 0 -and $seen.Count -lt 64) {
+    $file=$queue.Dequeue()
+    if (-not $seen.Add($file)) {continue}
+    try {
+        $item=Get-Item -LiteralPath $file -ErrorAction Stop
+        if ($item.Length -gt 262144) {throw 'SizeLimit'}
+        $answer.files_consulted+=@{path=$file; sha256=(Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash}
+        $n=0
+        foreach ($line in [IO.File]::ReadAllLines($file)) {
+            $n++; $s=$line.Trim()
+            if ($s.StartsWith('#')) {continue}
+            if ($s -match '(?i)^(Include|IncludeOptional|include)\s+([^;]+)') {
+                $inc=$Matches[2].Trim().Trim('"')
+                if ($inc -notmatch '\$' -and [IO.Path]::IsPathRooted($inc)) {
+                    foreach ($child in @(Get-ChildItem -Path $inc -File -ErrorAction SilentlyContinue | Select-Object -First 64)) {$queue.Enqueue($child.FullName)}
+                } else {$answer.errors+=@{location=$file; reason='include_relativo_o_variable_pendiente'}}
+            }
+            if ($s -match '(?i)^(LoadModule\s+php\S*|FcgidWrapper|fastcgi_pass|SetHandler|ProxyPassMatch)\s+') {
+                $directive=$Matches[1]; $target='no_resuelto'
+                if ($s -match '(?i)([A-Z]:[\\/][^"\r\n]*?php(?:-cgi|[0-9]+apache[0-9_]*)\.(?:exe|dll))') {$target=$Matches[1]; [void]$paths.Add($target)}
+                elseif ($s -match '([A-Za-z0-9_.-]+:\d{1,5})') {$target=$Matches[1]}
+                $answer.config+=@{server='apache_nginx'; file=$file; line=$n; directive=$directive; target=$target; state='configurada_en_disco'}
+            }
+        }
+    } catch {$answer.errors+=@{location=$file; reason='config_no_legible'}}
+}
+foreach ($exe in @($paths | Select-Object -First 64)) {
+    try {
+        $file=Get-Item -LiteralPath $exe -ErrorAction Stop
+        $version=''
+        if ($file.VersionInfo.ProductVersion -match '(\d+\.\d+\.\d+(?:[-.]?(?:RC|beta|alpha)\d+)?)') {$version=$Matches[1]}
+        $pids=@($answer.processes | Where-Object {$_.executable -eq $exe} | ForEach-Object {$_.pid})
+        $answer.binaries+=@{path=$exe; version=$version; sha256=(Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash; pids=$pids; runtime_state=$(if ($pids.Count) {'proceso_php_observado'} else {'configurado_uso_no_confirmado'})}
+    } catch {$answer.errors+=@{location=$exe; reason='ejecutable_no_legible'}}
+}
+foreach ($edge in $answer.config) {
+    $pids=@($answer.processes | Where-Object {$_.executable -and $_.executable -eq $edge.target} | ForEach-Object {$_.pid})
+    if ($pids.Count) {$edge.worker_pids=$pids; $edge.state='handler_configurado_y_proceso_observado'}
+}
+$answer.status=if (@($answer.config | Where-Object {$_.worker_pids}).Count) {'handler_y_worker_observados'} elseif (@($answer.processes | Where-Object {$_.name -match '^php'}).Count) {'worker_observado_ruta_web_pendiente'} elseif ($answer.config.Count) {'configuracion_sin_worker_correlacionado'} elseif ($answer.errors.Count) {'pendiente_no_evaluado'} else {'sin_runtime_detectado_en_fuentes'}
+$answer | ConvertTo-Json -Depth 12 -Compress
+'@
+    $answer=Invoke-JsonProbe $body
+    if ($null -eq $answer) {
+        return @{status='pendiente_no_evaluado'; errors=@(@{location='php_web'; reason='consulta_fallida_o_timeout'}); config=@(); binaries=@(); files_consulted=@(); processes=@()}
+    }
+    return $answer
+}
+
 $script:Stage='runtime_initialization'
 $services=@(); $processes=@(); $containers=@(); $localAddresses=@(); $os=$null
 try {
     if ($PSVersionTable.PSVersion -lt [Version]'5.1') {throw 'PowerShell 5.1 required'}
     Add-Type -AssemblyName System.IO.Compression
     $script:Stage='system_inventory'
-    $os=Get-CimInstance Win32_OperatingSystem -OperationTimeoutSec 15
+    $osAnswer=Invoke-JsonProbe '@{items=@(Get-CimInstance Win32_OperatingSystem -OperationTimeoutSec 1 | Select-Object Caption,Version,BuildNumber,OSArchitecture)} | ConvertTo-Json -Depth 4 -Compress'
+    $os=if ($osAnswer -and @($osAnswer.items).Count) {@($osAnswer.items)[0]} else {$null}
+    if (-not $os) {Add-Problem 'sistema_auxiliar' 'consulta_no_disponible'}
     $localAddresses=@()
     try {
         foreach ($adapter in [Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces()) {
@@ -225,15 +357,19 @@ try {
         }
     } catch {Add-Problem 'direcciones_locales' 'consulta_no_disponible'}
     $script:Stage='service_inventory'
-    $services=@()
-    try {
-        $services=@(Get-CimInstance Win32_Service -OperationTimeoutSec 15 | Where-Object {$_.Name -match 'php|apache|httpd|nginx|tomcat|instana|ds_agent|trend|cloudreset|W3SVC'} | ForEach-Object {@{name=$_.Name; state=$_.State}})
-    } catch {Add-Problem 'servicios' 'consulta_no_disponible'}
-    $processes=@()
-    try {$processes=@(Get-Process | Where-Object {$_.ProcessName -match 'php|apache|httpd|nginx|tomcat|java|instana|ds_agent|trend|cloudreset'} | ForEach-Object {
-        $exe=''; try {$exe=$_.Path} catch {}
-        @{name=$_.ProcessName; pid=$_.Id; executable=$exe}
-    })} catch {Add-Problem 'procesos' 'consulta_no_disponible'}
+    $auxStart=$script:ErrorCount
+    $services=@(Get-ServicesBounded)
+    $phpErrorsStart=$script:ErrorCount
+    $script:Stage='php_web_runtime'
+    $web=Get-WebRuntimeBounded
+    $processes=@($web.processes)
+    foreach ($bin in @($web.binaries)) {
+        if ('php' -notin @($config.checks)) {continue}
+        Add-Observation 'php' $bin.path $bin.version 'windows_product_version'
+        $obs=$script:Observations[$script:Observations.Count-1]
+        $obs.runtime_state=$bin.runtime_state; $obs.sha256=$bin.sha256
+        $obs.provenance=@{provider='no_confirmado'; note='ProductVersion y hash no certifican backports ni firma del proveedor.'}
+    }
     $script:Stage='php_inventory'
     if ('php' -in @($config.checks)) {
         $php=Get-Command php.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -246,6 +382,7 @@ try {
             }
         }
     }
+    $phpCollectionErrors=$script:ErrorCount-$phpErrorsStart
     $containers=@()
     if ($config.container_inventory) {
         foreach ($engine in @('docker','podman')) {
@@ -263,36 +400,40 @@ try {
         $roots=@('C:\PHP','C:\Program Files\PHP','C:\Program Files (x86)\PHP',
                  'C:\xampp\php','C:\wamp\bin\php','C:\wamp64\bin\php')
         if ($php) {$roots+=Split-Path -Parent $php.Source}
+        foreach ($bin in @($web.binaries)) {$roots+=Split-Path -Parent $bin.path}
         foreach ($proc in $processes) {
             if ($proc.name -match '^php' -and $proc.executable) {$roots+=Split-Path -Parent $proc.executable}
         }
         $config.windows_roots=@($roots | Select-Object -Unique)
     }
     $script:Stage='file_search'
+    $phpWalkErrorsStart=$script:ErrorCount
     Walk-Roots
+    $phpCollectionErrors+=($script:ErrorCount-$phpWalkErrorsStart)
     $searchState=if ($script:ErrorCount -gt 0 -or $script:BudgetExhausted) {'parcial'} elseif ($script:Completed.Count -eq 0) {'sin_rutas_revisadas'} else {'completado_en_rutas'}
     $families=@{}
     foreach ($family in @($config.checks)) {
         $families[$family]=@{status=$searchState; sources=@('archivos en raíces configuradas')}
         if ($family -eq 'php') {
             $families[$family].sources=@('PHP CLI en PATH','metadatos de ejecutables en raíces configuradas')
-            $families[$family].runtime_web='pendiente_de_correlacion'
-            if ($config.php_inventory_only -and $script:ErrorCount -eq 0 -and -not $script:BudgetExhausted) {$families[$family].status='completado_en_fuentes'}
+            $families[$family].runtime_web=$web.status
+            $families[$family].runtime_errors=@($web.errors)
+            if ($config.php_inventory_only -and $phpCollectionErrors -eq 0 -and @($web.errors).Count -eq 0 -and -not $script:BudgetExhausted) {$families[$family].status='completado_en_fuentes'}
             $families[$family].note='No acredita ausencia de PHP fuera de las fuentes consultadas ni en contenedores.'
         }
     }
     $script:Stage='result_serialization'
     $result=@{
-        schema_version=1; collector_version='1.5-piloto'; status='recolectado'; platform='windows'; timestamp_utc=[DateTime]::UtcNow.ToString('o')
+        schema_version=1; collector_version='1.6-evidencia'; status='recolectado'; platform='windows'; timestamp_utc=[DateTime]::UtcNow.ToString('o')
         system=@{hostname=[Environment]::MachineName; ip_addresses=$localAddresses; PRETTY_NAME=$os.Caption; VERSION_ID=$os.Version; build=$os.BuildNumber; architecture=$os.OSArchitecture}
-        observations=@($script:Observations.ToArray()); services=$services; processes=$processes; containers=$containers
+        observations=@($script:Observations.ToArray()); services=$services; processes=$processes; containers=$containers; php_web=$web; service_coverage=$script:ServiceCoverage
         trend_local=@{services=@($services | Where-Object {$_.name -match 'ds_agent|trend'}); note='Evidencia local; estado de protección y cobertura requieren consola de Seguridad.'}
         coverage=@{
             file_search=$searchState; families=$families
             roots_requested=@($config.windows_roots); roots_completed=@($script:Completed.ToArray()); roots_absent=@($script:Absent.ToArray()); excluded=@($config.windows_excludes)
             files_seen=$script:FileCount; archives_seen=$script:ArchiveCount; errors_count=$script:ErrorCount; errors=@($script:Errors.ToArray()); budget_exhausted=$script:BudgetExhausted
             elapsed_seconds=[Math]::Round(([DateTime]::UtcNow-$script:Started).TotalSeconds,2); limits=$config
-            limitations=@('Solo rutas configuradas; no prueba ausencia global.','Contenedores: solo inventario; imágenes y contenido interno no inspeccionados.','No correlaciona automáticamente bibliotecas con aplicaciones ni exposición pública.','No evalúa condiciones de explotación ni configuraciones de Struts/PHP.','Los volúmenes adicionales requieren raíces explícitas; no se siguen junctions ni reparse points.')
+            limitations=@('Solo rutas configuradas; no prueba ausencia global.','Contenedores: solo inventario; imágenes y contenido interno no inspeccionados.','Correlación por configuración/proceso; no demuestra petición atendida ni exposición pública.','No evalúa condiciones de explotación ni configuraciones de Struts/PHP.','Los volúmenes adicionales requieren raíces explícitas; no se siguen junctions ni reparse points.')
         }
     }
 } catch {

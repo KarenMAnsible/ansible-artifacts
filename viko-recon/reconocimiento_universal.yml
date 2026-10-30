@@ -7,6 +7,14 @@
   vars_files:
     - vars/defaults.yml
   tasks:
+    - name: Restringir esta revisión PHP a los cuatro pilotos autorizados
+      ansible.builtin.assert:
+        that:
+          - ansible_play_hosts_all | difference(['huawei_viko_new_pruebas_seguridad', 'gcp_sin_definir_trend', 'alibaba_viko_ecs_ansible', 'huawei_viko_new_vikowebnew']) | length == 0
+        fail_msg: 'Versión 1.6 en validación: seleccione únicamente los pilotos en Límite. Los lotes generales se preparan después.'
+      run_once: true
+      when: "'php' in (vuln_checks | default(vuln_defaults_checks))"
+
     # VIKO_VAULT_ACCESOS_V1
     - name: Preparar acceso desde Vault cuando se solicita
       ansible.builtin.include_tasks: tasks/vault_accesos.yml
@@ -59,6 +67,7 @@
           max_entries: "{{ (vuln_max_entries | default(vuln_defaults_max_entries)) | int }}"
           archive_depth: "{{ (vuln_archive_depth | default(vuln_defaults_archive_depth)) | int }}"
           max_observations: "{{ (vuln_max_observations | default(vuln_defaults_max_observations)) | int }}"
+          php_config_paths: "{{ vuln_php_config_paths | default([]) }}"
           php_inventory_only: "{{ vuln_php_inventory_only | default(false) | bool }}"
           run_php_version: "{{ (vuln_run_php_version | default(vuln_defaults_run_php_version)) | bool }}"
           container_inventory: "{{ (vuln_container_inventory | default(vuln_defaults_container_inventory)) | bool }}"
@@ -136,9 +145,12 @@
           loop: "{{ ansible_play_hosts_all }}"
           no_log: true
 
+        - name: Preparar cruce de inventario sin divulgar accesos
+          ansible.builtin.include_tasks: tasks/audit_inventory.yml
+
         - name: Escribir entrada privada para consolidación
           ansible.builtin.copy:
-            content: "{{ {'checks': (vuln_checks | default(vuln_defaults_checks)), 'hosts': _vuln_input} | to_nice_json }}"
+            content: "{{ {'checks': (vuln_checks | default(vuln_defaults_checks)), 'hosts': _vuln_input, 'inventory_audit': _vuln_audit, 'access_records_count': _vuln_audit_access | length} | to_nice_json }}"
             dest: "{{ _vuln_out_dir }}/entrada.json"
             mode: '0600'
           no_log: true
