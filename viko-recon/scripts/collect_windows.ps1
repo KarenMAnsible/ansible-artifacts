@@ -424,7 +424,7 @@ try {
     }
     $script:Stage='result_serialization'
     $result=@{
-        schema_version=1; collector_version='1.6-evidencia'; status='recolectado'; platform='windows'; timestamp_utc=[DateTime]::UtcNow.ToString('o')
+        schema_version=1; collector_version='1.6.1-evidencia'; status='recolectado'; platform='windows'; timestamp_utc=[DateTime]::UtcNow.ToString('o')
         system=@{hostname=[Environment]::MachineName; ip_addresses=$localAddresses; PRETTY_NAME=$os.Caption; VERSION_ID=$os.Version; build=$os.BuildNumber; architecture=$os.OSArchitecture}
         observations=@($script:Observations.ToArray()); services=$services; processes=$processes; containers=$containers; php_web=$web; service_coverage=$script:ServiceCoverage
         trend_local=@{services=@($services | Where-Object {$_.name -match 'ds_agent|trend'}); note='Evidencia local; estado de protección y cobertura requieren consola de Seguridad.'}

@@ -418,7 +418,11 @@ class Collector:
                         base = '/etc/nginx' if server == 'nginx' else '/etc/apache2' if '/apache2/' in path else '/etc/httpd' if server == 'apache' else os.path.dirname(path)
                         target = value if os.path.isabs(value) else os.path.join(base, value)
                         matches = sorted(glob.glob(target))
-                        if not matches and not s.lower().startswith('includeoptional'): issue(path, 'include_sin_coincidencia')
+                        if not matches and not s.lower().startswith('includeoptional'):
+                            # Nginx permits an include mask to match no files. A missing
+                            # explicit file remains an omission. Never output the raw line.
+                            if not (server == 'nginx' and glob.has_magic(target)):
+                                issue(path, 'include_explicito_sin_coincidencia')
                         queue.extend(matches)
                 directive = ''
                 value = ''
@@ -697,7 +701,7 @@ class Collector:
                 if self.budget_exhausted: families[family]['status'] = 'parcial'
             else:
                 families[family] = {'status': file_search, 'sources': ['archivos en raíces configuradas']}
-        return {'schema_version': 1, 'collector_version': '1.6-evidencia', 'status': 'recolectado', 'platform': 'linux', 'system': system,
+        return {'schema_version': 1, 'collector_version': '1.6.1-evidencia', 'status': 'recolectado', 'platform': 'linux', 'system': system,
                 'timestamp_utc': datetime.datetime.now(datetime.timezone.utc).isoformat(),
                 'observations': self.observations, 'services': services, 'processes': processes,
                 'trend_local': trend, 'containers': containers, 'php_web': getattr(self, 'php_web', {}),

@@ -331,6 +331,7 @@ def render_php_evidence(report):
         parts += ['', 'EVIDENCIA PHP 1.6 | ' + str(host['host']), 'Resultado: ' + host.get('php_result', 'pendiente_no_evaluado'),
                   'Runtime observado: ' + host.get('runtime_web', 'pendiente_no_evaluado'),
                   'Cobertura PHP: ' + host.get('coverage_php', 'no_evaluado'),
+                  'Omisiones de correlación PHP: ' + str(len(host.get('php_web', {}).get('errors', []))),
                   'Servicios auxiliares: ' + json.dumps(host.get('service_coverage', {}), ensure_ascii=False)]
         parts.append('Configuración, módulos, workers y omisiones (sin argumentos ni variables de entorno):')
         parts.append(json.dumps(host.get('php_web', {}), ensure_ascii=False, indent=2))

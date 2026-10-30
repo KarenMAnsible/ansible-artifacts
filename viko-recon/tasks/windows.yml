@@ -4,10 +4,9 @@
     error_action: stop
     script: |
       $ErrorActionPreference = 'Stop'
-      $scriptText = @'
-      $config = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{{ _vuln_config | to_json | b64encode }}')) | ConvertFrom-Json
-      {{ lookup('ansible.builtin.file', playbook_dir ~ '/scripts/collect_windows.ps1') }}
-      '@
+      # Encode source before embedding: collector here-strings must not close this wrapper.
+      $scriptText = "`$config = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{{ _vuln_config | to_json | b64encode }}')) | ConvertFrom-Json`n"
+      $scriptText += [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{{ lookup('ansible.builtin.file', playbook_dir ~ '/scripts/collect_windows.ps1') | b64encode }}'))
       function Write-Diagnostic([string]$Code, [string]$Stage, [int]$ExitCode=-1, [string]$ExceptionType='', [int]$Line=0) {
           $result = @{status='no_evaluado'; platform='windows'; reason=('Fallo de recolección Windows: '+$Code); timestamp_utc=[DateTime]::UtcNow.ToString('o'); diagnostics=@{code=$Code; stage=$Stage; exit_code=$ExitCode; exception_type=$ExceptionType; line=$Line}}
           [Console]::WriteLine('VIKO_VULN_JSON:'+($result | ConvertTo-Json -Depth 8 -Compress))

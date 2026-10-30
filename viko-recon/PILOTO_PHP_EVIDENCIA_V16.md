@@ -42,18 +42,18 @@ La delegación local interna que genera reportes se conserva.
 Password, Vault VIKO - Vault Accesos, encuesta desactivada, vuln_use_vault: true:
 
 ```
-huawei_viko_new_pruebas_seguridad,gcp_sin_definir_trend
+huawei_viko_new_pruebas_seguridad,gcp_sin_definir_trend,huawei_viko_new_vikowebnew
 ```
 
-SSH Key, encuesta desactivada, vuln_use_vault: false: ejecutar por separado si sus
-llaves Machine son diferentes. No presuponer que una llave cubre ambos bloques.
+Viko Web es por contraseña según la corrección de la usuaria. El primer Job 1.6
+mostró que el registro utilizado aún estaba clasificado como key. Antes de incluirlo
+otra vez, corregir puntualmente la clasificación usando el acceso real; no basta
+cambiar su plantilla. Véase CORRECCION_PILOTO_PHP_V161.md.
+
+SSH Key, encuesta desactivada, vuln_use_vault: false:
 
 ```
 alibaba_viko_ecs_ansible
-```
-
-```
-huawei_viko_new_vikowebnew
 ```
 
 Seleccionar la credencial Machine que ya corresponde a cada piloto. No modificar
