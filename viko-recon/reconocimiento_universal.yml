@@ -7,11 +7,19 @@
   vars_files:
     - vars/defaults.yml
   tasks:
-    - name: Restringir esta revisión PHP a los cuatro pilotos autorizados
+    - name: Validar objetivos PHP autorizados por lote
       ansible.builtin.assert:
         that:
-          - ansible_play_hosts_all | difference(['huawei_viko_new_pruebas_seguridad', 'gcp_sin_definir_trend', 'alibaba_viko_ecs_ansible', 'huawei_viko_new_vikowebnew']) | length == 0
-        fail_msg: 'Versión 1.6 en validación: seleccione únicamente los pilotos en Límite. Los lotes generales se preparan después.'
+          - (vuln_campaign_hosts | default(['huawei_viko_new_pruebas_seguridad', 'gcp_sin_definir_trend', 'alibaba_viko_ecs_ansible', 'huawei_viko_new_vikowebnew'])) is sequence
+          - (vuln_campaign_hosts | default(['huawei_viko_new_pruebas_seguridad', 'gcp_sin_definir_trend', 'alibaba_viko_ecs_ansible', 'huawei_viko_new_vikowebnew'])) is not string
+          - (vuln_campaign_hosts | default(['huawei_viko_new_pruebas_seguridad', 'gcp_sin_definir_trend', 'alibaba_viko_ecs_ansible', 'huawei_viko_new_vikowebnew'])) is not mapping
+          - (vuln_campaign_hosts | default(['huawei_viko_new_pruebas_seguridad', 'gcp_sin_definir_trend', 'alibaba_viko_ecs_ansible', 'huawei_viko_new_vikowebnew'])) | length > 0
+          - ansible_play_hosts_all | difference((vuln_campaign_hosts | default(['huawei_viko_new_pruebas_seguridad', 'gcp_sin_definir_trend', 'alibaba_viko_ecs_ansible', 'huawei_viko_new_vikowebnew']))) | length == 0
+          - "'localhost' not in ansible_play_hosts_all"
+          - vuln_campaign_hosts is not defined or (vuln_checks | default(vuln_defaults_checks)) == ['php']
+          - vuln_campaign_hosts is not defined or (ansible_limit | default('') | trim | length > 0)
+          - vuln_campaign_hosts is not defined or (ansible_play_hosts_all | length <= 20)
+        fail_msg: 'Objetivos fuera del lote autorizado. Use una lista vuln_campaign_hosts, solo PHP, Límite explícito y máximo 20 equipos. Sin lista se conservan los cuatro pilotos.'
       run_once: true
       when: "'php' in (vuln_checks | default(vuln_defaults_checks))"
 
