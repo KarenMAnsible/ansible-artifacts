@@ -7,21 +7,221 @@
   vars_files:
     - vars/defaults.yml
   tasks:
-    - name: Validar objetivos PHP autorizados por lote
+    - name: Validar alcance PHP por Limite
+      vars:
+        _viko_php_campaign_aliases:
+        - alibaba_viko_ecs_ansible
+        - alibaba_viko_ecs_ascendum
+        - alibaba_viko_ecs_farmapiel
+        - alibaba_viko_josefina
+        - alibaba_viko_modasapqas2026
+        - alibaba_viko_modatelas_2025
+        - alibaba_viko_modatelas_sapsolman
+        - aws_casa_dragones_casa_dragones_new
+        - aws_dominio_servidorbd
+        - aws_dominio_viko_prod_1
+        - aws_gdg_gdg2
+        - aws_gdg_pruebagdg
+        - aws_jose_cuervo_open_vpn_2_11_3
+        - aws_jose_cuervo_po_dev
+        - aws_jose_cuervo_po_pro
+        - aws_jose_cuervo_po_qas
+        - aws_jose_cuervo_saprouter_po
+        - aws_natasa_ads_des
+        - aws_natasa_ads_pro
+        - aws_natasa_portal_des
+        - aws_natasa_portal_pro
+        - aws_natasa_s4hana_des
+        - aws_natasa_s4hanapro
+        - aws_natasa_sap_cloud_agent1
+        - aws_natasa_saprouter
+        - aws_natasa_windows2022
+        - aws_sanchez_actualizado_pro
+        - aws_sanchez_clondesarrollo
+        - aws_sanchez_hana_pro
+        - aws_sanchez_hana_qas
+        - aws_sanchez_netweaver_pro
+        - aws_sanchez_netweaver_qas
+        - aws_sanchez_producciontomcat_env
+        - aws_sanchez_saprouter
+        - gcp_sin_definir_achdev
+        - gcp_sin_definir_achpro
+        - gcp_sin_definir_b1hanapro_nuevo
+        - gcp_sin_definir_degasa1
+        - gcp_sin_definir_fer_sap2
+        - gcp_sin_definir_pasvpnp0
+        - gcp_sin_definir_pasvpnq01
+        - gcp_sin_definir_rackware_1_vm
+        - gcp_sin_definir_trend
+        - huawei_apeotactico_huawei_fiori
+        - huawei_apeotactico_huawei_s4hana_pro
+        - huawei_apeotactico_huawei_s4hanadev
+        - huawei_ayala_huawei_ayalapro_sybase
+        - huawei_ayala_huawei_saprouter
+        - huawei_bruluart_huawei_bru_win
+        - huawei_bruluart_huawei_contpaq_new
+        - huawei_bruluart_huawei_ecs_sql
+        - huawei_bruluart_huawei_qas_dev_actualizado7_50
+        - huawei_bruluart_huawei_qas_dev_viejo
+        - huawei_bruluart_huawei_qas_dev_viejo_clon
+        - huawei_bruluart_huawei_sappro
+        - huawei_bruluart_huawei_servidor_middleware
+        - huawei_cortina_huawei_cortina_clon_desarollo2026
+        - huawei_cortina_huawei_cortina_cortina_1
+        - huawei_cortina_huawei_cortina_cortina_oddo1
+        - huawei_cortina_huawei_cortina_desarrollov17
+        - huawei_cortina_huawei_cortina_nuevo_cortina
+        - huawei_cuadritos_huawei_sapdes
+        - huawei_cuadritos_huawei_sappro
+        - huawei_cuadritos_huawei_sapqas
+        - huawei_cuervo_new_cuervoerp_dev
+        - huawei_cuervo_new_erp_qas
+        - huawei_cuervo_new_facturacion
+        - huawei_dacsa_huawei_crmdacsa_crmmarberw16
+        - huawei_dacsa_huawei_linux_dacsa
+        - huawei_dacsa_huawei_sap_router
+        - huawei_dacsa_huawei_sybase_dacsa_erppro_nueva
+        - huawei_dyn_huawei_dym_facturacion
+        - huawei_dyn_huawei_dyn_dev
+        - huawei_dyn_huawei_pro_dyn
+        - huawei_dyn_huawei_qas_dyn
+        - huawei_dyn_huawei_saprouter
+        - huawei_dyn_huawei_windows_test
+        - huawei_enable_huawei_bw4hana
+        - huawei_enable_huawei_enable001
+        - huawei_enable_huawei_enable004_enable_mx_new
+        - huawei_enable_huawei_enable006
+        - huawei_enable_huawei_enable_bpc
+        - huawei_enable_huawei_enablepro_nuevo
+        - huawei_enable_huawei_enabletst_new
+        - huawei_enable_huawei_s4hana_nuevo
+        - huawei_enable_huawei_terminal_server
+        - huawei_farmaamigo_aplicativo_qas
+        - huawei_farmaamigo_farmaamigo_produccion
+        - huawei_farmaamigo_h4n4_00_qas
+        - huawei_farmaamigo_pasteko
+        - huawei_farmaamigo_saprouter
+        - huawei_farmapiel_huawei_aspel_coi
+        - huawei_farmapiel_huawei_ecs_farma
+        - huawei_farmapiel_huawei_portalviaticos
+        - huawei_farmapiel_huawei_sap_windows
+        - huawei_farmapiel_huawei_saphana
+        - huawei_grupo_edid_cnefintec
+        - huawei_grupo_edid_hananefintecnuevo
+        - huawei_grupo_edid_if_server
+        - huawei_grupo_edid_vertical
+        - huawei_grupo_romo_gr_sapdes_new
+        - huawei_grupo_romo_gr_sapqas_new
+        - huawei_grupo_romo_gr_saprouter
+        - huawei_grupo_romo_gr_svr_sqlwin_22
+        - huawei_grupo_romo_grapp_new
+        - huawei_grupo_romo_grbbdd_new
+        - huawei_grupo_romo_grerppro_new
+        - huawei_grupo_romo_romobiomet
+        - huawei_grupo_romo_srvcompaqi
+        - huawei_grupomoyel_aplicativo_b1
+        - huawei_grupomoyel_b1_hana
+        - huawei_grupomoyel_prizma
+        - huawei_kenworth_app_pro_clubers
+        - huawei_kenworth_atcamiones1
+        - huawei_kenworth_atcamiones_s4hanadev
+        - huawei_kenworth_clon_aws
+        - huawei_kenworth_k2partnering_dev
+        - huawei_kenworth_kenworth_pro
+        - huawei_kenworth_produccion_atm
+        - huawei_kenworth_qas_volvo
+        - huawei_kenworth_saperppro_volvo
+        - huawei_kenworth_saprouter
+        - huawei_kenworth_utility_win
+        - huawei_kenworth_webdisp_uitlity
+        - huawei_kreston_huawei_ecs_krt
+        - huawei_kreston_huawei_kreston
+        - huawei_kreston_huawei_kreston2023
+        - huawei_kreston_huawei_kreston2026
+        - huawei_kreston_huawei_nuevo_kreston
+        - huawei_macma_huawei_sap_bwpro_drp
+        - huawei_macma_huawei_sap_erppro_drp
+        - huawei_macma_huawei_saprouter
+        - huawei_marber_new_bw4hana
+        - huawei_marber_new_crmmarber
+        - huawei_marber_new_ecs_marber1
+        - huawei_marber_new_erppro_sybase
+        - huawei_marber_new_linux_marnov
+        - huawei_marber_new_saprouter
+        - huawei_marber_new_sync_ayala
+        - huawei_marber_new_win_marber
+        - huawei_marber_new_windows_marber
+        - huawei_marnov_huawei_eppro_sybase_marnov
+        - huawei_marnov_huawei_marnov_central
+        - huawei_marnov_huawei_saprouter
+        - huawei_maver_viko_drpmaver
+        - huawei_modatelas_huawei_clon_calidad
+        - huawei_olmeca_01_adriano
+        - huawei_olmeca_01_desarrollo_clon
+        - huawei_olmeca_01_nextpro
+        - huawei_olmeca_01_numbus
+        - huawei_olmeca_01_olmeca
+        - huawei_olmeca_01_portalqas
+        - huawei_olmeca_01_portalvinte
+        - huawei_olmeca_01_qanetcoall
+        - huawei_olmeca_01_rocketbot
+        - huawei_sinergman_pro2026
+        - huawei_sinergman_qas_2026
+        - huawei_sinergman_s4hana_dev_qas
+        - huawei_sinergman_s4hana_pro
+        - huawei_sinergman_saprouter
+        - huawei_viko_new_airquality_suse
+        - huawei_viko_new_airquality_windows
+        - huawei_viko_new_b1_hanapro_c3
+        - huawei_viko_new_balanceador_c3
+        - huawei_viko_new_corpomare
+        - huawei_viko_new_ecs_c3
+        - huawei_viko_new_famouswin2019_freshkampo_new
+        - huawei_viko_new_fixgab
+        - huawei_viko_new_hana_cockpit
+        - huawei_viko_new_migracionsuse
+        - huawei_viko_new_migracionwindows
+        - huawei_viko_new_modatelas_b1
+        - huawei_viko_new_nas_freshkampo_new
+        - huawei_viko_new_openvpn_freshkampo
+        - huawei_viko_new_present1rdp
+        - huawei_viko_new_present1rdp_c3
+        - huawei_viko_new_presentador3_c3
+        - huawei_viko_new_presentador4_c3
+        - huawei_viko_new_pruebas_seguridad
+        - huawei_viko_new_sapcloud_c3
+        - huawei_viko_new_sapsql_freshkampo_new
+        - huawei_viko_new_smartagro_freshkampo_new
+        - huawei_viko_new_srv_fkfrida_freshkampo
+        - huawei_viko_new_tag_dev
+        - huawei_viko_new_tag_pro
+        - huawei_viko_new_vikowebnew
+        - ibm_356904_enable_viko_degasa
+        - ibm_356904_enable_viko_documentacion
+        - ibm_356904_enable_viko_megadev1_enable_viko_cloud
+        - ibm_356904_enable_viko_megapro01_enable_viko_cloud
+        - ibm_356904_enable_viko_megaqas01_enable_viko_cloud
+        - ibm_grupo_romo_creative
+        - ibm_grupo_romo_insite
+        - ibm_itzoil_emerson_webserpro
+        - ibm_itzoil_emerson_webserqas
+        - ibm_itzoil_emersonapp
+        - ibm_itzoil_emersondesbd1
+        - ibm_itzoil_proemersonappl
+        - ibm_itzoil_proemersondb
+        - ibm_itzoil_proemersondesws
+        - ibm_itzoil_proemersonws
       ansible.builtin.assert:
         that:
-          - (vuln_campaign_hosts | default(['huawei_viko_new_pruebas_seguridad', 'gcp_sin_definir_trend', 'alibaba_viko_ecs_ansible', 'huawei_viko_new_vikowebnew'])) is sequence
-          - (vuln_campaign_hosts | default(['huawei_viko_new_pruebas_seguridad', 'gcp_sin_definir_trend', 'alibaba_viko_ecs_ansible', 'huawei_viko_new_vikowebnew'])) is not string
-          - (vuln_campaign_hosts | default(['huawei_viko_new_pruebas_seguridad', 'gcp_sin_definir_trend', 'alibaba_viko_ecs_ansible', 'huawei_viko_new_vikowebnew'])) is not mapping
-          - (vuln_campaign_hosts | default(['huawei_viko_new_pruebas_seguridad', 'gcp_sin_definir_trend', 'alibaba_viko_ecs_ansible', 'huawei_viko_new_vikowebnew'])) | length > 0
-          - ansible_play_hosts_all | difference((vuln_campaign_hosts | default(['huawei_viko_new_pruebas_seguridad', 'gcp_sin_definir_trend', 'alibaba_viko_ecs_ansible', 'huawei_viko_new_vikowebnew']))) | length == 0
-          - "'localhost' not in ansible_play_hosts_all"
-          - vuln_campaign_hosts is not defined or (vuln_checks | default(vuln_defaults_checks)) == ['php']
-          - vuln_campaign_hosts is not defined or (ansible_limit | default('') | trim | length > 0)
-          - vuln_campaign_hosts is not defined or (ansible_play_hosts_all | length <= 20)
-        fail_msg: 'Objetivos fuera del lote autorizado. Use una lista vuln_campaign_hosts, solo PHP, Límite explícito y máximo 20 equipos. Sin lista se conservan los cuatro pilotos.'
+        - ansible_limit | default('') | trim | length > 0
+        - '''localhost'' not in ansible_play_hosts_all'
+        - ansible_play_hosts_all | length <= 20
+        - ansible_play_hosts_all | difference(_viko_php_campaign_aliases if (vuln_checks | default(vuln_defaults_checks)) == ['php']
+          else ['huawei_viko_new_pruebas_seguridad', 'gcp_sin_definir_trend', 'alibaba_viko_ecs_ansible', 'huawei_viko_new_vikowebnew'])
+          | length == 0
+        fail_msg: 'Revise el Limite: solo alias autorizados, sin localhost y maximo 20 equipos.'
       run_once: true
-      when: "'php' in (vuln_checks | default(vuln_defaults_checks))"
+      when: '''php'' in (vuln_checks | default(vuln_defaults_checks))'
 
     # VIKO_VAULT_ACCESOS_V1
     - name: Preparar acceso desde Vault cuando se solicita
