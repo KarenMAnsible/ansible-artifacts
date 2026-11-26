@@ -216,7 +216,7 @@
         - ansible_limit | default('') | trim | length > 0
         - '''localhost'' not in ansible_play_hosts_all'
         - ansible_play_hosts_all | length <= 20
-        - ansible_play_hosts_all | difference((_viko_php_campaign_aliases + ['huawei_bruluart_huawei_imb_qas']) if (vuln_checks | default(vuln_defaults_checks)) == ['log4j'] else _viko_php_campaign_aliases if (vuln_checks | default(vuln_defaults_checks)) == ['php']
+        - ansible_play_hosts_all | difference((_viko_php_campaign_aliases + ['huawei_bruluart_huawei_imb_qas']) if ((vuln_checks | default(vuln_defaults_checks)) | sort) in [['log4j'], ['log4j', 'php', 'struts']] else _viko_php_campaign_aliases if (vuln_checks | default(vuln_defaults_checks)) == ['php']
           else ['huawei_viko_new_balanceador_c3', 'huawei_viko_new_pruebas_seguridad', 'gcp_sin_definir_trend', 'alibaba_viko_ecs_ansible', 'huawei_viko_new_vikowebnew'])
           | length == 0
         fail_msg: 'Revise el Limite: solo alias autorizados, sin localhost y maximo 20 equipos.'
