@@ -160,7 +160,11 @@
           exec 9>"$state_dir/lock"
           flock -n 9 || die 'Hay otra tarea de Moyel en curso'
           files=( "$source_dir"/FULL_BKP_NDB_"$label"_databackup_* )
-          (( ${#files[@]} == 3 )) || die "Se esperaban tres partes del respaldo $label"
+          file_count=0
+          for file in "${files[@]}"; do
+            (( file_count += 1 ))
+          done
+          (( file_count == 3 )) || die "Se esperaban tres partes del respaldo $label"
           for part in 0_1 2_1 3_1; do
             [[ -f "$source_dir/FULL_BKP_NDB_${label}_databackup_$part" ]] || die "Falta parte $part"
           done
@@ -188,13 +192,13 @@
             chmod 0600 "$temp"
             mv -f -- "$temp" "$manifest"
             trap failure EXIT
-            logger -t moyel-hana-backup -- "PREPARE_OK day=$day parts=${#files[@]}"
+            logger -t moyel-hana-backup -- "PREPARE_OK day=$day parts=$file_count"
             exit 0
           fi
 
           [[ -s "$manifest" ]] || die 'Falta manifiesto de las 02:00'
           parts="$(wc -l < "$manifest")"
-          (( parts == ${#files[@]} )) || die 'Cambio el numero de partes desde las 02:00'
+          (( parts == file_count )) || die 'Cambio el numero de partes desde las 02:00'
           while IFS=$'\t' read -r filename size mtime; do
             [[ "$filename" == FULL_BKP_NDB_"$label"_databackup_* ]] || die "Nombre inesperado: $filename"
             file="$source_dir/$filename"
