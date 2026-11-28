@@ -104,20 +104,14 @@
           - -U
           - BKPMONNDB
           - >-
-            SELECT 'MOYEL_HANA_OK' AS RESULT FROM DUMMY WHERE EXISTS (
-              SELECT c.BACKUP_ID
-              FROM SYS.M_BACKUP_CATALOG c
-              JOIN SYS.M_BACKUP_CATALOG_FILES f ON c.ENTRY_ID = f.ENTRY_ID
-              WHERE LOWER(c.ENTRY_TYPE_NAME) = 'complete data backup'
-                AND LOWER(c.STATE_NAME) = 'successful'
-                AND f.DESTINATION_PATH IN (
-                  '/Backup/DB_NDB/Data/DB_NDB/FULL_BKP_NDB_{{ moyel_backup_label.stdout }}_databackup_0_1',
-                  '/Backup/DB_NDB/Data/DB_NDB/FULL_BKP_NDB_{{ moyel_backup_label.stdout }}_databackup_2_1',
-                  '/Backup/DB_NDB/Data/DB_NDB/FULL_BKP_NDB_{{ moyel_backup_label.stdout }}_databackup_3_1'
-                )
-              GROUP BY c.BACKUP_ID
-              HAVING COUNT(DISTINCT f.DESTINATION_PATH) = 3
-            )
+            SELECT 'MOYEL_HANA_OK' AS RESULT
+            FROM SYS.M_BACKUP_CATALOG c
+            JOIN SYS.M_BACKUP_CATALOG_FILES f ON c.ENTRY_ID = f.ENTRY_ID
+            WHERE LOWER(c.ENTRY_TYPE_NAME) = 'complete data backup'
+              AND LOWER(c.STATE_NAME) = 'successful'
+              AND REPLACE(f.DESTINATION_PATH, '//', '/') LIKE '/Backup/DB_NDB/Data/DB_NDB/FULL_BKP_NDB_{{ moyel_backup_label.stdout }}_databackup_%'
+            GROUP BY c.BACKUP_ID
+            HAVING COUNT(DISTINCT f.DESTINATION_PATH) = 3
       become_user: ndbadm
       changed_when: false
       check_mode: false
