@@ -1,0 +1,157 @@
+---
+# AAP: Inventory Assessment-Servidores; Limit huawei_grupomoyel_b1_hana.
+# /Backup is XFS without reflink. Never copy 117 GB to another path on /Backup.
+# OBS retention touches only date prefixes with this script's .complete marker.
+- name: Validar y subir los respaldos HANA de Moyel
+  hosts: all
+  gather_facts: false
+  become: true
+  vars:
+    moyel_expected_ip: '94.74.71.221'
+    moyel_obsutil_path: /root/obsutil_linux_amd64_5.4.11/obsutil
+  pre_tasks:
+    - name: Limitar la ejecución al servidor de Moyel
+      ansible.builtin.assert:
+        that:
+          - ansible_play_hosts_all | length == 1
+          - (ansible_host | default(inventory_hostname)) == moyel_expected_ip
+        fail_msg: 'Configurar Limit huawei_grupomoyel_b1_hana, IP 94.74.71.221.'
+
+    - name: Comprobar obsutil
+      ansible.builtin.stat:
+        path: '{{ moyel_obsutil_path }}'
+      register: moyel_obsutil_file
+
+    - name: Requerir el ejecutable existente
+      ansible.builtin.assert:
+        that:
+          - moyel_obsutil_file.stat.exists
+          - moyel_obsutil_file.stat.isreg
+
+    - name: Comprobar herramientas de control
+      ansible.builtin.shell: 'command -v flock && command -v logger && command -v stat'
+      changed_when: false
+
+  tasks:
+    - name: Crear directorio privado de manifiestos
+      ansible.builtin.file:
+        path: /var/lib/moyel-hana-backup
+        state: directory
+        owner: root
+        group: root
+        mode: '0700'
+
+    - name: Instalar script sin copia local adicional
+      ansible.builtin.copy:
+        dest: /usr/local/sbin/moyel-hana-backup
+        owner: root
+        group: root
+        mode: '0700'
+        content: |
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          shopt -s nullglob
+          export LC_ALL=C
+          action="${1:-}"
+          source_dir=/Backup/DB_NDB/Data/DB_NDB
+          state_dir=/var/lib/moyel-hana-backup
+          obsutil=/root/obsutil_linux_amd64_5.4.11/obsutil
+          obs_prefix=obs://moyel-backup/MOYEL-RESPALDOS/BACKUP2026
+          day="$(date +%F)"
+          label="$(date +%d%b%y)"
+          manifest="$state_dir/$day.manifest"
+
+          failure() {
+            local status=$?
+            (( status == 0 )) || logger -p daemon.err -t moyel-hana-backup -- "FAILED action=$action day=$day rc=$status"
+          }
+          trap failure EXIT
+          die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+          [[ "$action" == prepare || "$action" == upload ]] || die 'Accion invalida'
+          [[ -d "$source_dir" && -d "$state_dir" && -x "$obsutil" ]] || die 'Falta origen, estado u obsutil'
+          exec 9>"$state_dir/lock"
+          flock -n 9 || die 'Hay otra tarea de Moyel en curso'
+          files=( "$source_dir"/FULL_BKP_NDB_"$label"_databackup_* )
+          (( ${#files[@]} > 0 )) || die "No hay respaldo para $label"
+
+          if [[ "$action" == prepare ]]; then
+            now="$(date +%s)"
+            before=()
+            for file in "${files[@]}"; do
+              [[ -f "$file" && ! -L "$file" ]] || die "Archivo inesperado: $file"
+              size="$(stat -c %s -- "$file")"
+              mtime="$(stat -c %Y -- "$file")"
+              (( now - mtime >= 1200 )) || die "Archivo aun reciente: $file"
+              before+=( "$size:$mtime" )
+            done
+            sleep 30
+            for i in "${!files[@]}"; do
+              [[ "$(stat -c '%s:%Y' -- "${files[$i]}")" == "${before[$i]}" ]] || die 'El respaldo cambio durante la validacion'
+            done
+            temp="$(mktemp "$state_dir/.manifest.XXXXXXXX")"
+            trap 'rm -f -- "$temp"; failure' EXIT
+            for file in "${files[@]}"; do
+              printf '%s\t%s\t%s\n' "${file##*/}" "$(stat -c %s -- "$file")" "$(stat -c %Y -- "$file")" >> "$temp"
+            done
+            chmod 0600 "$temp"
+            mv -f -- "$temp" "$manifest"
+            trap failure EXIT
+            logger -t moyel-hana-backup -- "PREPARE_OK day=$day parts=${#files[@]}"
+            exit 0
+          fi
+
+          [[ -s "$manifest" ]] || die 'Falta manifiesto de las 02:00'
+          parts="$(wc -l < "$manifest")"
+          (( parts == ${#files[@]} )) || die 'Cambio el numero de partes desde las 02:00'
+          while IFS=$'\t' read -r filename size mtime; do
+            [[ "$filename" == FULL_BKP_NDB_"$label"_databackup_* ]] || die "Nombre inesperado: $filename"
+            file="$source_dir/$filename"
+            [[ -f "$file" && ! -L "$file" ]] || die "Falta: $filename"
+            [[ "$(stat -c '%s:%Y' -- "$file")" == "$size:$mtime" ]] || die "Cambio: $filename"
+          done < "$manifest"
+
+          while IFS=$'\t' read -r filename size mtime; do
+            "$obsutil" sync "$source_dir/$filename" "$obs_prefix/$day/$filename" -vlength
+          done < "$manifest"
+          marker="$state_dir/$day.complete"
+          printf 'day=%s\nparts=%s\n' "$day" "$parts" > "$marker"
+          chmod 0600 "$marker"
+          "$obsutil" sync "$marker" "$obs_prefix/$day/.complete" -vlength
+          logger -t moyel-hana-backup -- "UPLOAD_OK day=$day parts=$parts"
+
+          # Retain at least today's and the two prior complete daily backups.
+          # Delete only one older prefix owned by this script, never legacy folders.
+          keep_complete=1
+          for offset in 1 2; do
+            previous="$(date -d "$day - $offset days" +%F)"
+            key="$obs_prefix/$previous/.complete"
+            listing="$("$obsutil" ls "$key" -limit=1)" || die "OBS no disponible: $key"
+            grep -Fq -- "$key" <<< "$listing" || keep_complete=0
+          done
+          older="$(date -d "$day - 3 days" +%F)"
+          old_key="$obs_prefix/$older/.complete"
+          if (( keep_complete )); then
+            listing="$("$obsutil" ls "$old_key" -limit=1)" || die "OBS no disponible: $old_key"
+            if grep -Fq -- "$old_key" <<< "$listing"; then
+              "$obsutil" rm "$obs_prefix/$older/" -r -f
+              logger -t moyel-hana-backup -- "RETENTION_OK removed=$older"
+            fi
+          else
+            logger -p daemon.warning -t moyel-hana-backup -- 'RETENTION_SKIPPED missing previous complete day'
+          fi
+
+    - name: Validar los archivos del dia a las 02:00
+      ansible.builtin.cron:
+        name: 'Moyel HANA - validar respaldo diario'
+        user: root
+        minute: '0'
+        hour: '2'
+        job: /usr/local/sbin/moyel-hana-backup prepare
+
+    - name: Subir el respaldo del dia a OBS a las 05:00
+      ansible.builtin.cron:
+        name: 'Moyel HANA - subir respaldo diario a OBS'
+        user: root
+        minute: '0'
+        hour: '5'
+        job: /usr/local/sbin/moyel-hana-backup upload
