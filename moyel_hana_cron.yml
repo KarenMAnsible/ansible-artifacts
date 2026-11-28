@@ -1,8 +1,9 @@
 ---
-# AAP: Inventory Assessment-Servidores; Limit huawei_grupomoyel_b1_hana.
+# AAP: Two scheduled job templates, one for prepare at 02:00 and one for upload at 05:00.
+# Both templates: Inventory Assessment-Servidores; Limit huawei_grupomoyel_b1_hana.
 # /Backup is XFS without reflink. Never copy 117 GB to another path on /Backup.
 # OBS retention touches only date prefixes with this script's .complete marker.
-- name: Validar y subir los respaldos HANA de Moyel
+- name: Ejecutar respaldo HANA de Moyel desde AAP
   hosts: all
   gather_facts: false
   become: true
@@ -17,7 +18,8 @@
           - ansible_play_hosts_all | length == 1
           - inventory_hostname == moyel_vault_alias
           - (ansible_host | default(inventory_hostname)) == moyel_expected_ip
-        fail_msg: 'Configurar Limit huawei_grupomoyel_b1_hana, IP 94.74.71.221.'
+          - moyel_action | default('') in ['prepare', 'upload']
+        fail_msg: 'Configurar Limit huawei_grupomoyel_b1_hana, IP 94.74.71.221 y moyel_action prepare/upload.'
 
     - name: Cargar el Vault de accesos sin exponerlo
       ansible.builtin.include_vars:
@@ -181,18 +183,8 @@
             logger -p daemon.warning -t moyel-hana-backup -- 'RETENTION_SKIPPED missing previous complete day'
           fi
 
-    - name: Validar los archivos del dia a las 02:00
-      ansible.builtin.cron:
-        name: 'Moyel HANA - validar respaldo diario'
-        user: root
-        minute: '0'
-        hour: '2'
-        job: /usr/local/sbin/moyel-hana-backup prepare
-
-    - name: Subir el respaldo del dia a OBS a las 05:00
-      ansible.builtin.cron:
-        name: 'Moyel HANA - subir respaldo diario a OBS'
-        user: root
-        minute: '0'
-        hour: '5'
-        job: /usr/local/sbin/moyel-hana-backup upload
+    - name: Ejecutar la fase solicitada por AAP
+      ansible.builtin.command:
+        argv:
+          - /usr/local/sbin/moyel-hana-backup
+          - '{{ moyel_action }}'
