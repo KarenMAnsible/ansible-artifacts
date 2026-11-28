@@ -224,7 +224,7 @@
             listing="$("$obsutil" ls "$key" -limit=1)" || die "OBS no disponible: $key"
             grep -Fq -- "$key" <<< "$listing" || keep_complete=0
           done
-          older="$(date -d "$day - 3 days" +%F)"
+          older="$(date -d "$day - 366 days" +%F)"
           old_key="$obs_prefix/$older/.complete"
           if (( keep_complete )); then
             listing="$("$obsutil" ls "$old_key" -limit=1)" || die "OBS no disponible: $old_key"
