@@ -8,14 +8,55 @@
   become: true
   vars:
     moyel_expected_ip: '94.74.71.221'
+    moyel_vault_alias: huawei_grupomoyel_b1_hana
     moyel_obsutil_path: /root/obsutil_linux_amd64_5.4.11/obsutil
   pre_tasks:
     - name: Limitar la ejecución al servidor de Moyel
       ansible.builtin.assert:
         that:
           - ansible_play_hosts_all | length == 1
+          - inventory_hostname == moyel_vault_alias
           - (ansible_host | default(inventory_hostname)) == moyel_expected_ip
         fail_msg: 'Configurar Limit huawei_grupomoyel_b1_hana, IP 94.74.71.221.'
+
+    - name: Cargar el Vault de accesos sin exponerlo
+      ansible.builtin.include_vars:
+        file: '{{ playbook_dir }}/group_vars/all/vault.yml'
+        name: _moyel_vault
+      no_log: true
+
+    - name: Seleccionar la credencial exacta de Moyel
+      ansible.builtin.set_fact:
+        _moyel_access: "{{ _moyel_vault.viko_assessment_access.get(moyel_vault_alias, {}) }}"
+      no_log: true
+
+    - name: Validar la credencial antes de conectar
+      ansible.builtin.assert:
+        that:
+          - _moyel_access is mapping
+          - _moyel_access.status | default('pendiente') == 'listo'
+          - _moyel_access.family | default('') == 'linux'
+          - _moyel_access.mode | default('') in ['password', 'key']
+          - (_moyel_access.address | default('') | string) == moyel_expected_ip
+          - (_moyel_access.user | default('') | string | length) > 0
+          - _moyel_access.mode | default('') != 'password' or (_moyel_access.password | default('') | string | length) > 0
+        fail_msg: 'Revisar el acceso de Moyel en Vault: alias, estado, familia, IP y usuario.'
+      no_log: true
+
+    - name: Aplicar usuario, dirección y puerto del Vault
+      ansible.builtin.set_fact:
+        ansible_host: '{{ _moyel_access.address }}'
+        ansible_user: '{{ _moyel_access.user }}'
+        ansible_connection: ssh
+        ansible_port: "{{ _moyel_access.port | default(22) | int }}"
+      no_log: true
+
+    - name: Aplicar la contraseña solo si el acceso es de ese tipo
+      ansible.builtin.set_fact:
+        ansible_password: '{{ _moyel_access.password }}'
+        ansible_ssh_pass: '{{ _moyel_access.password }}'
+      when: _moyel_access.mode == 'password'
+      no_log: true
 
     - name: Comprobar obsutil
       ansible.builtin.stat:
