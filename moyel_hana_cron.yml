@@ -215,27 +215,6 @@
           "$obsutil" sync "$marker" "$obs_prefix/$day/.complete" -vlength
           logger -t moyel-hana-backup -- "UPLOAD_OK day=$day parts=$parts"
 
-          # Retain at least today's and the two prior complete daily backups.
-          # Delete only one older prefix owned by this script, never legacy folders.
-          keep_complete=1
-          for offset in 1 2; do
-            previous="$(date -d "$day - $offset days" +%F)"
-            key="$obs_prefix/$previous/.complete"
-            listing="$("$obsutil" ls "$key" -limit=1)" || die "OBS no disponible: $key"
-            grep -Fq -- "$key" <<< "$listing" || keep_complete=0
-          done
-          older="$(date -d "$day - 366 days" +%F)"
-          old_key="$obs_prefix/$older/.complete"
-          if (( keep_complete )); then
-            listing="$("$obsutil" ls "$old_key" -limit=1)" || die "OBS no disponible: $old_key"
-            if grep -Fq -- "$old_key" <<< "$listing"; then
-              "$obsutil" rm "$obs_prefix/$older/" -r -f
-              logger -t moyel-hana-backup -- "RETENTION_OK removed=$older"
-            fi
-          else
-            logger -p daemon.warning -t moyel-hana-backup -- 'RETENTION_SKIPPED missing previous complete day'
-          fi
-
     - name: Ejecutar la fase solicitada por AAP
       ansible.builtin.command:
         argv:
