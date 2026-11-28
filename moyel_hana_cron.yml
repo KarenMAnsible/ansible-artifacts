@@ -74,6 +74,44 @@
     - name: Comprobar herramientas de control
       ansible.builtin.shell: 'command -v flock && command -v logger && command -v stat'
       changed_when: false
+      check_mode: false
+
+    - name: Obtener fecha de respaldo del propio servidor
+      ansible.builtin.command: date +%d%b%y
+      environment:
+        LC_ALL: C
+      changed_when: false
+      check_mode: false
+      register: moyel_backup_label
+
+    - name: Confirmar en HANA las tres partes de un backup exitoso
+      ansible.builtin.command:
+        argv:
+          - /usr/sap/NDB/HDB00/exe/hdbsql
+          - -U
+          - BKPMONNDB
+          - >-
+            SELECT 'MOYEL_HANA_OK' AS RESULT FROM DUMMY WHERE EXISTS (
+              SELECT c.BACKUP_ID
+              FROM SYS.M_BACKUP_CATALOG c
+              JOIN SYS.M_BACKUP_CATALOG_FILES f ON c.ENTRY_ID = f.ENTRY_ID
+              WHERE LOWER(c.ENTRY_TYPE_NAME) = 'complete data backup'
+                AND LOWER(c.STATE_NAME) = 'successful'
+                AND f.DESTINATION_PATH IN (
+                  '/Backup/DB_NDB/Data/DB_NDB/FULL_BKP_NDB_{{ moyel_backup_label.stdout }}_databackup_0_1',
+                  '/Backup/DB_NDB/Data/DB_NDB/FULL_BKP_NDB_{{ moyel_backup_label.stdout }}_databackup_2_1',
+                  '/Backup/DB_NDB/Data/DB_NDB/FULL_BKP_NDB_{{ moyel_backup_label.stdout }}_databackup_3_1'
+                )
+              GROUP BY c.BACKUP_ID
+              HAVING COUNT(DISTINCT f.DESTINATION_PATH) = 3
+            )
+      become_user: ndbadm
+      changed_when: false
+      check_mode: false
+      register: moyel_catalog_result
+      failed_when: >-
+        moyel_catalog_result.rc != 0 or
+        not (moyel_catalog_result.stdout is search('(?m)^"?MOYEL_HANA_OK"?$'))
 
   tasks:
     - name: Crear directorio privado de manifiestos
@@ -115,7 +153,10 @@
           exec 9>"$state_dir/lock"
           flock -n 9 || die 'Hay otra tarea de Moyel en curso'
           files=( "$source_dir"/FULL_BKP_NDB_"$label"_databackup_* )
-          (( ${#files[@]} > 0 )) || die "No hay respaldo para $label"
+          (( ${#files[@]} == 3 )) || die "Se esperaban tres partes del respaldo $label"
+          for part in 0_1 2_1 3_1; do
+            [[ -f "$source_dir/FULL_BKP_NDB_${label}_databackup_$part" ]] || die "Falta parte $part"
+          done
 
           if [[ "$action" == prepare ]]; then
             now="$(date +%s)"
@@ -123,6 +164,7 @@
             for file in "${files[@]}"; do
               [[ -f "$file" && ! -L "$file" ]] || die "Archivo inesperado: $file"
               size="$(stat -c %s -- "$file")"
+              (( size > 0 )) || die "Archivo vacio: $file"
               mtime="$(stat -c %Y -- "$file")"
               (( now - mtime >= 1200 )) || die "Archivo aun reciente: $file"
               before+=( "$size:$mtime" )
